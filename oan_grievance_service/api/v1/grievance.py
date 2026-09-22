@@ -23,7 +23,7 @@ from oan_grievance_service.api.v1._options import get_grievance_types, get_servi
 from oan_grievance_service.grievance_management.doctype.grievance_timeline.grievance_timeline import (
 	GrievanceTimeline,
 )
-from oan_grievance_service.services import audit, identity, lifecycle, routing, sla, submission
+from oan_grievance_service.services import assignment, audit, identity, lifecycle, routing, sla, submission
 from oan_grievance_service.services import constants as C
 
 # Aliased: several entry points take a `ticket_number` argument, which would
@@ -820,6 +820,49 @@ def reopen(ticket_number: str, reason: str):
 	return success_response(
 		data={"ticket_number": doc.ticket_number, "status": doc.status},
 		message=_("Grievance reopened successfully"),
+	)
+
+
+class AssignGrievanceRequest(BaseModel):
+	model_config = {"extra": "allow"}
+
+	ticket_number: str = Field(..., min_length=1)
+
+
+class ReassignGrievanceRequest(BaseModel):
+	model_config = {"extra": "allow"}
+
+	ticket_number: str = Field(..., min_length=1)
+	department: str = Field(..., min_length=1)
+	reason: str = Field(..., min_length=5)
+	officer: str | None = None
+
+
+@route("/<ticket_number>/assign", methods=("POST",), summary="Assign a grievance by the routing rule")
+@frappe.whitelist()
+@handle_api_errors
+@require_role(STAFF_ROLES)
+@validate_request(AssignGrievanceRequest)
+def assign(ticket_number: str):
+	"""STG-337: initial assignment follows the Category+Department routing rule."""
+	doc = _load(ticket_number)
+	return success_response(
+		data=assignment.initial_assign(doc),
+		message=_("Grievance assigned"),
+	)
+
+
+@route("/<ticket_number>/reassign", methods=("POST",), summary="Reassign a grievance to another department")
+@frappe.whitelist()
+@handle_api_errors
+@require_role(STAFF_ROLES)
+@validate_request(ReassignGrievanceRequest)
+def reassign(ticket_number: str, department: str, reason: str, officer: str | None = None):
+	"""STG-337: reassignment uses the same routing rule, with no approval and no SLA reset."""
+	doc = _load(ticket_number)
+	return success_response(
+		data=assignment.reassign(doc, department, reason, officer=officer),
+		message=_("Grievance reassigned"),
 	)
 
 

@@ -244,8 +244,16 @@ def reassignment_on_update(doc, method=None):
 	The reassignment is committed here, on approval, and nowhere else, which is what
 	makes 'the reassigned officer may act only after the approved assignment is
 	committed' true rather than aspirational.
+
+	STG-337 auto-routes through the assignment API and writes the request already
+	committed (`auto_routed`). That path has no approval step; the service has
+	already moved the case and kept the SLA clock, so this hook must not apply
+	the change again or reset the clock.
 	"""
 	from oan_grievance_service.permissions import can_approve_reassignment
+
+	if doc.auto_routed:
+		return
 
 	if doc.decision == "Pending":
 		notifications.queue(frappe.get_doc("Grievance", doc.grievance), C.EVENT_REASSIGNMENT_REQUESTED)

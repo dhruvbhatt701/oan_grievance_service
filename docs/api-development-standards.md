@@ -69,6 +69,8 @@ All REST endpoints in `oan_grievance_service` follow industry-standard RESTful c
 | Confirm Case              | `POST /api/v1/grievances/<ticket_number>/confirm`        | `POST /api/method/oan_grievance_service.api.v1.grievance.confirm`                     | POST   |
 | Reopen Case               | `POST /api/v1/grievances/<ticket_number>/reopen`         | `POST /api/method/oan_grievance_service.api.v1.grievance.reopen`                      | POST   |
 | Escalate Case             | `POST /api/v1/grievances/<ticket_number>/escalate`       | `POST /api/method/oan_grievance_service.api.v1.grievance.escalate`                    | POST   |
+| Assign Case               | `POST /api/v1/grievances/<ticket_number>/assign`         | `POST /api/method/oan_grievance_service.api.v1.grievance.assign`                      | POST   |
+| Reassign Case             | `POST /api/v1/grievances/<ticket_number>/reassign`       | `POST /api/method/oan_grievance_service.api.v1.grievance.reassign`                    | POST   |
 | Reply to Info Request     | `POST /api/v1/grievances/<ticket_number>/reply`          | `POST /api/method/oan_grievance_service.api.v1.grievance.reply`                       | POST   |
 
 ---
@@ -200,6 +202,55 @@ original `ticket_number` with `duplicate_submission: true`.
 **Validation failure:** HTTP 400, `code: VALIDATION_ERROR`, per-field `details` map
 (STG-321). Missing consent, short description, wrong mobile country code, and
 type↔category mismatches are included.
+
+---
+
+## 4.3 Assignment and Reassignment API (STG-337)
+
+Initial assignment and a later move to another department both use the active
+`Grievance Routing Rule` for the case's service category and administrative area.
+The officer is taken from the RBAC desk scoped to that department. Reassignment
+does not wait for approval, and a clock that is already running is not restarted.
+
+|      |                                                                    |
+| ---- | ------------------------------------------------------------------ |
+| REST | `POST /api/v1/grievances/<ticket_number>/assign`                   |
+| REST | `POST /api/v1/grievances/<ticket_number>/reassign`                 |
+| RPC  | `POST /api/method/oan_grievance_service.api.v1.grievance.assign`   |
+| RPC  | `POST /api/method/oan_grievance_service.api.v1.grievance.reassign` |
+| Auth | `Grievance Officer`, `Grievance Admin`, System Manager, Administrator |
+
+**Assign** takes no body fields beyond the ticket. The case must be `Submitted`
+and not yet assigned. The winning routing rule sets the department; the desk
+strategy sets the officer; the workflow action `Assign` moves the case to
+`Assigned` and starts the SLA clock.
+
+**Reassign body**
+
+```json
+{
+  "department": "<Grievance Department name>",
+  "reason": "Why the case is moving. At least five characters.",
+  "officer": "<optional User on the target desk>"
+}
+```
+
+The department must be a different department, and a routing rule for this
+category and area must name it. `officer`, when sent, must be an active member
+of that department's desk; otherwise the desk strategy picks. Only the current
+`assigned_to` user, or an administrator, may call it. Allowed while the case is
+`Assigned` or `In Progress`. From `In Progress` the workflow action is
+`Refer Onward`, which returns the case to `Assigned`.
+
+`sla_start_at`, `sla_due_date`, and the reminder flags are left as they were.
+The move is stored as an auto-routed `Grievance Reassignment Request`
+(`sla_treatment: Continue`, no approver) and as an append-only timeline
+`assignment` entry. Both refuse later edits. The approval hook does not run for
+`auto_routed` rows.
+
+**Success `data`:** `ticket_number`, `status`, `assignment` (`department`,
+`assigned_to`, `routing_rule`, `routed_automatically`), `sla`. Reassignment also
+returns `audit.name`, `audit.auto_routed`, and `audit.sla_treatment`.
 
 ---
 

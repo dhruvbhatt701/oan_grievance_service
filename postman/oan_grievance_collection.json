@@ -1440,6 +1440,64 @@
 					"response": []
 				},
 				{
+					"name": "10b. Assign Grievance",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"ticket_number\": \"{{ticket_number}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/method/oan_grievance_service.api.v1.grievance.assign",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"method",
+								"oan_grievance_service.api.v1.grievance.assign"
+							]
+						},
+						"description": "STG-337: Initial assignment. Routes a Submitted grievance by the Category+Department routing rule and starts the SLA clock. Officer and Grievance Admin only."
+					},
+					"response": []
+				},
+				{
+					"name": "10c. Reassign Grievance",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"ticket_number\": \"{{ticket_number}}\",\n    \"department\": \"Livestock Desk\",\n    \"reason\": \"Case belongs with the livestock desk for this category.\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/method/oan_grievance_service.api.v1.grievance.reassign",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"method",
+								"oan_grievance_service.api.v1.grievance.reassign"
+							]
+						},
+						"description": "STG-337: Reassign to another department using the same Category+Department routing rule. No approval step. The SLA clock is not reset. Only the assigned officer or an administrator."
+					},
+					"response": []
+				},
+				{
 					"name": "11. Confirm Resolution",
 					"event": [
 						{

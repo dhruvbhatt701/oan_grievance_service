@@ -12,6 +12,8 @@ Endpoints
     v1.grievance.confirm    FSD FR-06 / UC-03 confirm the resolution
     v1.grievance.reopen     FSD FR-06         reopen with a mandatory reason
     v1.grievance.escalate   FSD FR-07         escalate once the SLA has elapsed
+    v1.grievance.assign     FR-03 / STG-337   initial assignment by Category+Department rule
+    v1.grievance.reassign   FR-03 / STG-337   reassign without approval; SLA clock continues
 
 
     v1.administrative_area.get_areas   FSD 3.2.2   the location cascade and search

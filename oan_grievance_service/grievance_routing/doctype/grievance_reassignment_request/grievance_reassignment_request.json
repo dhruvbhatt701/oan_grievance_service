@@ -9,6 +9,7 @@
  "field_order": [
   "grievance",
   "decision",
+  "auto_routed",
   "requested_at",
   "col_reassign_from",
   "initiated_by",
@@ -41,6 +42,14 @@
    "in_standard_filter": 1,
    "label": "Decision",
    "options": "Pending\nApproved\nRejected"
+  },
+  {
+   "default": "0",
+   "description": "STG-337: set when the assignment API commits the move from the Category+Department routing rule with no approval step. The row is then an immutable audit entry and the SLA clock is left running.",
+   "fieldname": "auto_routed",
+   "fieldtype": "Check",
+   "label": "Auto Routed",
+   "read_only": 1
   },
   {
    "fieldname": "requested_at",

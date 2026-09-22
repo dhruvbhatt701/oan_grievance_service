@@ -297,6 +297,23 @@ def has_grievance_permission(doc, ptype="read", user=None):
 	return False
 
 
+def can_assign(user=None):
+	"""Initial assignment is a staff action. The routing rule picks the target."""
+	user = user or frappe.session.user
+	roles = set(frappe.get_roles(user))
+	return bool(roles & ({ROLE_OFFICER} | UNRESTRICTED_ROLES))
+
+
+def can_reassign(grievance, user=None):
+	"""STG-337: only the officer who holds the case, or an administrator, may reassign it."""
+	user = user or frappe.session.user
+	roles = set(frappe.get_roles(user))
+	if roles & UNRESTRICTED_ROLES:
+		return True
+	assigned = grievance.get("assigned_to") if isinstance(grievance, dict) else grievance.assigned_to
+	return ROLE_OFFICER in roles and bool(assigned) and assigned == user
+
+
 def can_approve_reassignment(user=None):
 	"""FSD 3.3.1: a reassignment is decided by a supervisor, not by its requester.
 

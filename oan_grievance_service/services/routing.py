@@ -16,8 +16,12 @@ MATCH_FIELDS = (
 )
 
 
-def find_matching_rule(grievance):
+def find_matching_rule(grievance, department=None):
 	"""Return the winning Grievance Routing Rule, or None for the manual queue.
+
+	`department` limits the result to a rule whose assigned department is that
+	value. Reassignment uses it so a move to another department still has to be
+	one the category and area rules allow.
 
 	Uses Nearest-Ancestor resolution for administrative_area:
 	A rule matches when its category and provider match (or are unconstrained),
@@ -88,6 +92,9 @@ def find_matching_rule(grievance):
 				else:
 					area_span = int(rule_rgt) - int(rule_lft)
 
+		if department and rule.assigned_dept != department:
+			continue
+
 		if matched:
 			# Sorting tuple: (rule_precedence, area_span, -specificity)
 			candidates.append((rule.rule_precedence or 0, area_span, -specificity, rule))
@@ -98,8 +105,12 @@ def find_matching_rule(grievance):
 	return candidates[0][3]
 
 
-def find_matching_assignment(grievance):
+def find_matching_assignment(grievance, department=None):
 	"""Return the winning Grievance RBAC Assignment (Desk), or None.
+
+	`department` keeps only desks whose department scope is that department, which
+	is how a reassignment picks an officer inside the department the routing rule
+	named.
 
 	Uses Nearest-Ancestor resolution for administrative_area_scope:
 	Matches when category and type match (or are unconstrained), and area is in subtree.
@@ -139,6 +150,9 @@ def find_matching_assignment(grievance):
 
 	candidates = []
 	for a in assignments:
+		if department and a.department_scope != department:
+			continue
+
 		specificity = 0
 		matched = True
 
@@ -226,6 +240,34 @@ def pick_officer_by_strategy(assignment_doc):
 	else:  # Primary First
 		active_officers.sort(key=lambda o: -int(getattr(o, "is_primary", 0) or 0))
 		return active_officers[0].user
+
+
+def resolve_officer(grievance, department, officer=None):
+	"""Officer for `department` from the matching RBAC desk.
+
+	With no `officer`, the desk's routing strategy picks one. A named officer is
+	accepted only when they are an active member of that desk. Returns None when
+	the department has no desk and the caller did not name an officer.
+	"""
+	from frappe import _
+
+	assignment = find_matching_assignment(grievance, department=department)
+	if officer:
+		if not assignment or not frappe.db.exists(
+			"Grievance RBAC Assignment Officer",
+			{"parent": assignment.name, "user": officer, "active": 1},
+		):
+			frappe.throw(
+				_("{0} is not an active officer on the routing desk for {1}.").format(officer, department),
+				title=_("Officer Not Routed"),
+			)
+		return officer
+
+	if not assignment:
+		return None
+
+	desk = frappe.get_doc("Grievance RBAC Assignment", assignment.name)
+	return pick_officer_by_strategy(desk)
 
 
 def apply_routing(grievance, commit_status=True):
