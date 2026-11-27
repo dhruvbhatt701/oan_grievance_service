@@ -17,6 +17,7 @@ from oan_grievance_service.patches import dismiss_legacy_duplicate_flags
 from oan_grievance_service.services import constants as C
 from oan_grievance_service.services import dashboard_rollup, duplicates, identity, ticket_export
 from oan_grievance_service.services import ticket_number as tn
+from oan_grievance_service.setup import install
 from oan_grievance_service.tests.fixtures import (
 	a_grievance,
 	a_grievance_type,
@@ -268,6 +269,16 @@ class TestDuplicateFlow(FrappeTestCase):
 		self._case()
 		dup = self._case(service_category=a_service_category(), grievance_type=a_grievance_type())
 		self.assertEqual(len(duplicates.flag_possible_duplicates(dup)), 1)
+
+	def test_another_sub_type_of_the_same_category_is_a_new_grievance(self):
+		"""Staging report 26 Nov 2026: the same farmer, category and text, another sub-type, was held."""
+		from oan_grievance_service.tests.test_classification import a_type
+
+		first = self._case()
+		other_type = a_type(first.service_category)
+		dup = self._case(grievance_type=other_type)
+		self.assertEqual(duplicates.flag_possible_duplicates(dup), [])
+		self.assertEqual(duplicates.matches_for(dup), [])
 
 	def test_only_live_or_resolved_tickets_are_candidates(self):
 		anchor = self._case(description=CANAL)
@@ -550,12 +561,16 @@ class TestDuplicateFlow(FrappeTestCase):
 		self.assertEqual(result["code"], "VALIDATION_ERROR", msg=result)
 
 	def test_dismissing_leaves_the_ticket_a_normal_one(self):
+		"""A normal one is routed: a ruling on a ticket still waiting for a desk sends it to one."""
 		_main, dup = self._pair()
 		duplicates.flag_possible_duplicates(dup)
+		install.seed_unrouted_desk()
 
 		result = grievance.dismiss_duplicate(ticket_number=dup.name, note="Different plot")
 
-		self.assertEqual(result["data"]["status"], C.STATE_SUBMITTED, msg=result)
+		dup.reload()
+		self.assertEqual(dup.workflow_state, C.STATE_ASSIGNED, msg=result)
+		self.assertTrue(dup.assigned_to)
 		self.assertIsNone(result["data"]["current_state"]["possible_duplicate"])
 		self.assertEqual(duplicates.pending_reviews(dup.name), [])
 		row = frappe.get_doc("Grievance Duplicate", {"grievance": dup.name})

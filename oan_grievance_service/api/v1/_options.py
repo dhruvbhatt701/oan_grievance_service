@@ -412,6 +412,18 @@ def case_status(case) -> str:
 	return public_status(case.get("status"), bool(case.get("escalated")))
 
 
+def currently_escalated(case) -> bool:
+	"""Whether an escalated case is still open, which is what a response's `escalated` reports.
+
+	The stored flag stays set once a case is decided, so reports and the ticket export can say it
+	was escalated (`was_escalated` in a response). A Resolved, Closed, Rejected or Duplicate case is
+	no longer in escalation and shows no Escalated badge.
+	"""
+	from oan_grievance_service.services import sla
+
+	return bool(case.get("escalated")) and sla.sla_category_of(case.get("status")) != sla.STOPPED
+
+
 def expand_status_filter(values: list[str]) -> list[str] | None:
 	"""Workflow states a queue-status filter matches.
 

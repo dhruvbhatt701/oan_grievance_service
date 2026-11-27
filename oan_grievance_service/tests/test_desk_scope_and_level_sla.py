@@ -15,7 +15,7 @@ from frappe.utils import get_datetime, now_datetime
 
 from oan_grievance_service import permissions
 from oan_grievance_service.api.v1 import grievance as grievance_api
-from oan_grievance_service.api.v1._options import STATUS_ESCALATED, public_status
+from oan_grievance_service.api.v1._options import STATUS_ESCALATED, currently_escalated, public_status
 from oan_grievance_service.api.v1.profile import resolve_user_profile_hook
 from oan_grievance_service.grievance_access_control.doctype.grievance_rbac_assignment.grievance_rbac_assignment import (
 	home_seat,
@@ -416,6 +416,63 @@ class TestEscalateEndpoint(_Base):
 		doc = self.case(self.category, self.dept, self.user[L4])
 		res = self.escalate_as(self.user[L4], doc.name, reason="Up.")
 		self.assertEqual(res["code"], "VALIDATION_ERROR", res)
+
+
+class TestEscalatedFlagInResponses(_Base):
+	"""Second report: the list still said Escalated after the case was resolved."""
+
+	def test_a_resolved_case_is_no_longer_escalated_but_was(self):
+		dept, category = a_unique_department("Flag"), a_category()
+		l1, l2 = self.officer("l1"), self.officer("l2")
+		_desk(dept, category, [(l1, L1, None), (l2, L2, None)])
+		doc = self.case(category, dept, l1)
+		sla.escalate(doc, reason="SLA breached")
+		doc.reload()
+		row = frappe._dict(status=doc.status, escalated=doc.escalated)
+		self.assertTrue(currently_escalated(row))
+		frappe.set_user(l2)
+		try:
+			lifecycle.transition(doc, "Resolve", reason="Looked into it and fixed it.")
+		finally:
+			frappe.set_user("Administrator")
+		doc.reload()
+		self.assertTrue(doc.escalated, "the stored flag still says it was escalated")
+		self.assertFalse(currently_escalated(doc))
+		state = grievance_api._current_state(doc)
+		self.assertEqual((state["escalated"], state["was_escalated"]), (False, True))
+
+
+class TestConfirmationWindow(FrappeTestCase):
+	"""Second report: the reopen (appeal) window is 30 days, as the catalogue says."""
+
+	def test_the_default_window_is_thirty_days(self):
+		self.assertIn((C.STATE_RESOLVED, 30 * 24, "Auto Close"), C.DEFAULT_STATE_TIMERS)
+
+	def test_the_patch_moves_only_an_untouched_seven_day_timer(self):
+		from oan_grievance_service.patches import lengthen_confirmation_window
+
+		filters = {
+			"parenttype": "Grievance Deferral Policy",
+			"parent": "Grievance Deferral Policy",
+			"workflow_state": C.STATE_RESOLVED,
+		}
+		try:
+			if not frappe.db.exists("Grievance State Timer", filters):
+				frappe.get_doc(
+					{
+						"doctype": "Grievance State Timer",
+						"parentfield": "state_timers",
+						"hours": 7 * 24,
+						"on_expiry": "Auto Close",
+						**filters,
+					}
+				).db_insert()
+			for hours, expected in ((7 * 24, 30 * 24), (10 * 24, 10 * 24)):
+				frappe.db.set_value("Grievance State Timer", filters, "hours", hours)
+				lengthen_confirmation_window.execute()
+				self.assertEqual(frappe.db.get_value("Grievance State Timer", filters, "hours"), expected)
+		finally:
+			frappe.db.rollback()
 
 
 class TestEscalatedStatus(FrappeTestCase):

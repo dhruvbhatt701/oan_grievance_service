@@ -1656,14 +1656,14 @@ paths:
         \ types (optionally filtered by service_category)\n    submission_channels: Active intake channels\n\
         \    officers: Active officers under the specified department and/or service category (staff only,\
         \ present only if either is passed)\n    can_change_category: With `ticket_number`, for staff:\
-        \ whether the caller may move the case to\n        another category or department (administrators,\
-        \ and the fallback desk triaging it)\n\nWith `ticket_number` the officers are the assignees that\
-        \ case can be reassigned to: only\nofficers whose region covers the case's administrative area\
-        \ (the case's own area wins over\n`administrative_area`), in the case's category unless another\
-        \ is named, and never the\ncategory admin (the top rung), who is not an assignee for a reassignment.\
-        \ For an officer\nwho is not an administrator they are only the officers the caller may hand the\
-        \ case to\n(`reassignment.officer_move_limits`): the next level up, which may be the category\
-        \ admin,\nand for a desk head the officers below them."
+        \ whether the caller may move the case to\n        another category (administrators, and the fallback\
+        \ desk triaging it)\n\nWith `ticket_number` the officers are the assignees that case can be reassigned\
+        \ to: only\nofficers whose region covers the case's administrative area (the case's own area wins\
+        \ over\n`administrative_area`), in the case's category unless another is named, and never the\n\
+        category admin (the top rung), who is not an assignee for a reassignment. For an officer\nwho\
+        \ is not an administrator they are only the officers in line for the caller\n(`reassignment.officer_move_limits`):\
+        \ the next level up, which may be the category admin,\nand the officers below the caller on a\
+        \ desk covering the case. Any other pick waits for\nthe receiving head's approval."
       operationId: get_api_v1_grievances_options
       responses:
         '200':

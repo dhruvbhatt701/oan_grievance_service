@@ -29,7 +29,8 @@ read-only. Code: `services/duplicates.py`. Algorithm background: `GRIEVANCE_SIMI
      action `Confirm Duplicate`, adds the public timeline message and marks the row confirmed.
      The ticket's other pending flags are dismissed as superseded.
    - `POST /v1/grievances/{ticket}/duplicate/dismiss` marks the rows dismissed and adds an internal
-     note. The ticket stays a normal one.
+     note. The ticket stays a normal one: one still Submitted with nobody assigned is routed then,
+     as a new filing is.
 
 The main ticket must be the same submitter's and still open or resolved (Submitted, Assigned,
 Reopened, In Progress, More Info Needed or Resolved): never Closed, Rejected or itself a duplicate,
@@ -48,6 +49,7 @@ terminal and the Grievance controller refuses every save.
 | Status    | Submitted, Assigned, Reopened, In Progress, More Info Needed, Resolved                 |
 | Window    | The prompt looks back 24 hours (`PROMPT_WINDOW_HOURS`). The officer flag has no window |
 | Pool      | The submitter's 200 most recent tickets                                                |
+| Sub-type  | Another sub-type of the same category is a new grievance and is not compared           |
 
 Submitted, Assigned and Reopened are candidates on purpose. A double submit is compared with a
 ticket that has barely been routed, and the specification's three statuses alone would miss it.
@@ -65,7 +67,9 @@ of 1.
 - `description` is the cosine of character 3-5-grams of the normalised text: lower-cased,
   punctuation removed, Ge'ez homophones folded (ሐ/ኀ to ሀ, ሠ to ሰ, ዐ to አ, ጸ to ፀ). Folding is applied to
   the copy used for matching only; the stored description is never changed.
-- Category and type are weights, not filters, because submitters sometimes pick the wrong one.
+- Category and type are weights, not filters, because submitters sometimes pick the wrong category.
+  The exception is the Sub-type rule above: within one category a different sub-type is a different
+  grievance (staging test report, 26 Nov 2026).
 - A flag needs `score >= 0.65` (the flag threshold); `High` is `>= 0.85`, otherwise `Medium`.
 - Category plus type is 0.30, below the threshold, so matching labels alone never flag. Saving
   Grievance Settings is refused if the category weight plus the type weight reaches the flag

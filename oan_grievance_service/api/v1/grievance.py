@@ -42,6 +42,7 @@ from oan_grievance_service.api.v1._case_view import (
 from oan_grievance_service.api.v1._options import (
 	active_channels,
 	case_status,
+	currently_escalated,
 	expand_status_filter,
 	get_department_officers,
 	get_departments,
@@ -770,7 +771,8 @@ def list_grievances(
 	officer_may_act = permissions.officer_write_check() if is_staff else None
 	flagged = _flagged_duplicates(items) if is_staff else {}
 	for item in items:
-		item["escalated"] = bool(item.get("escalated"))
+		item["was_escalated"] = bool(item.get("escalated"))
+		item["escalated"] = currently_escalated(item)
 		item["possible_duplicate_of"] = flagged.get(item["name"])
 		item["duplicate_of"] = tn.display(item["duplicate_of"]) if item.get("duplicate_of") else None
 		deadline = sla.deadline_view(item, timer_cache)
@@ -1001,7 +1003,8 @@ def _current_state(doc, extra=None, as_submitter=False):
 	is_staff = permissions.is_staff(user) and not as_submitter
 	state = {
 		"status": case_status(doc),
-		"escalated": bool(doc.escalated),
+		"escalated": currently_escalated(doc),
+		"was_escalated": bool(doc.escalated),
 		"assigned_to": doc.assigned_to if is_staff else None,
 		"assigned_to_name": _assignee_name(doc) if is_staff else None,
 		"department": doc.assigned_dept if is_staff or not doc.is_sensitive else None,
@@ -1573,7 +1576,9 @@ def timeline(
 			"name": doc.name,
 			"ticket_number": summary["ticket_number"],
 			"status": summary["status"],
-			"escalated": bool(doc.escalated),
+			# Still in escalation; `was_escalated` keeps that it ever was.
+			"escalated": currently_escalated(doc),
+			"was_escalated": bool(doc.escalated),
 			"description": summary["description"],
 			"desired_outcome": summary["desired_outcome"],
 			"service_category": summary["service_category"],
@@ -2176,9 +2181,10 @@ def options(
 	officers whose region covers the case's administrative area (the case's own area wins over
 	`administrative_area`), in the case's category unless another is named, and never the
 	category admin (the top rung), who is not an assignee for a reassignment. For an officer
-	who is not an administrator they are only the officers the caller may hand the case to
+	who is not an administrator they are only the officers in line for the caller
 	(`reassignment.officer_move_limits`): the next level up, which may be the category admin,
-	and for a desk head the officers below them.
+	and the officers below the caller on a desk covering the case. Any other pick waits for
+	the receiving head's approval.
 	"""
 	cat = service_category or category
 	exclude_role_levels = None

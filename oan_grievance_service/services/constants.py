@@ -120,7 +120,10 @@ EVENT_EC_ID = {
 DEFAULT_SLA_DAYS = 7
 # State timers the Grievance Deferral Policy starts with: (state, hours, on_expiry).
 DEFAULT_STATE_TIMERS = (
-	(STATE_RESOLVED, 7 * 24, "Auto Close"),
+	# The confirmation window: the submitter may reopen (appeal) a decision for 30 days (Routing
+	# Matrix, "Appeal and reinvestigation"). Patch `lengthen_confirmation_window` moves sites that
+	# kept the old 7-day default.
+	(STATE_RESOLVED, 30 * 24, "Auto Close"),
 	(STATE_MORE_INFO_NEEDED, 7 * 24, "Auto Close"),
 )
 # Reminder thresholds as a percentage of the SLA window, and the event each one sends.

@@ -14,7 +14,8 @@ The description is a cosine over character n-grams of the normalised text. Only 
 submitter's tickets are ever compared (a handful, not millions), so there is no index and
 no IDF weighting: the pool is too small for inverse document frequency to mean anything.
 Category and type are weights, not filters, because submitters sometimes pick the wrong
-one. The weights and thresholds are starting points an administrator tunes in Grievance
+category. One exception: another sub-type of the same category is a second grievance and is
+never compared (`other_sub_type`). The weights and thresholds are starting points an administrator tunes in Grievance
 Settings from measurements on labelled pairs; the defaults live here until they are set.
 """
 
@@ -237,11 +238,30 @@ def candidates_for(grievance, since=None):
 	)
 
 
+def other_sub_type(grievance, other) -> bool:
+	"""Whether the tickets share a category but name different sub-types.
+
+	A farmer who files a second sub-type of the same category (late seed, then fertilizer price)
+	has a second grievance, however alike the two texts read, so the pair is never flagged. Across
+	categories the texts still decide: the same complaint filed again under the wrong category is
+	a repeat. An officer who finds a repeat under the wrong sub-type still confirms it by naming the
+	main ticket (`confirm`).
+	"""
+	mine, theirs = grievance.get("grievance_type"), other.get("grievance_type")
+	same_category = grievance.get("service_category") == other.get("service_category")
+	return bool(same_category and mine and theirs and mine != theirs)
+
+
 def matches_for(grievance, since=None):
-	"""[(score, earlier ticket)] at or above the threshold, best first; the older wins a tie."""
+	"""[(score, earlier ticket)] at or above the threshold, best first; the older wins a tie.
+
+	Tickets of another sub-type are not compared (`other_sub_type`).
+	"""
 	config = tuning()
 	matches = []
 	for other in candidates_for(grievance, since):
+		if other_sub_type(grievance, other):
+			continue
 		value = score(grievance, other, config)
 		if value >= config.threshold:
 			matches.append((value, other))
@@ -479,7 +499,27 @@ def confirm(grievance, main_name=None, note=None):
 
 
 def dismiss(grievance, note=None):
-	"""An officer rules the flag is wrong. The ticket carries on as a normal one."""
+	"""An officer rules the flag is wrong. The ticket carries on as a normal one.
+
+	A ticket still waiting for a desk (Submitted, nobody assigned) is routed now, as a new filing
+	is, so the ruling never leaves it unassigned (`route_if_waiting`).
+	"""
+	entry = _dismiss_reviews(grievance, note)
+	route_if_waiting(grievance)
+	return entry
+
+
+def route_if_waiting(grievance):
+	"""Route a ticket that is still Submitted with nobody on it. Returns the desk, or None."""
+	from oan_grievance_service.services import routing
+
+	grievance.reload()
+	if grievance.workflow_state != C.STATE_SUBMITTED or grievance.assigned_to:
+		return None
+	return routing.apply_routing(grievance)
+
+
+def _dismiss_reviews(grievance, note=None):
 	assert_not_duplicate(grievance)
 	pending = pending_reviews(grievance.name)
 	if not pending:
