@@ -39,7 +39,7 @@ from frappe import _
 from oan_grievance_service.grievance_access_control.doctype.grievance_rbac_assignment.grievance_rbac_assignment import (
 	active_scopes,
 	current_level_of,
-	get_subordinate_officers,
+	desk_teams,
 	top_rung,
 )
 from oan_grievance_service.grievance_management.doctype.grievance_submitter_profile.grievance_submitter_profile import (
@@ -144,7 +144,7 @@ def officer_case_scopes(user, scopes=None):
 	"""The desks through which an officer reads cases they are not assigned.
 
 	Only the top rung (category admin) reads a whole desk's cases. Every other officer reads
-	the cases assigned to them and to their reports, and nothing else.
+	the cases assigned to them and to the officers below them on the same desk, and nothing else.
 
 	`scopes` is the user's `active_scopes`, for a caller that has them already.
 	"""
@@ -153,39 +153,92 @@ def officer_case_scopes(user, scopes=None):
 	return [scope for scope in scopes if top and scope.get("role_level") == top]
 
 
+def _scope_clause(scope, bounds):
+	"""SQL for the cases inside one scope, or None when the scope sets no field.
+
+	`bounds` is `area_bounds` of the scopes, read once by the caller.
+	"""
+	dept_scope = scope.get("department_scope")
+	cat_scope = scope.get("category_scope")
+	gtype_scope = scope.get("grievance_type_scope")
+	prov_scope = scope.get("service_provider_scope")
+	area_scope = scope.get("administrative_area_scope")
+
+	include_parts = []
+
+	if dept_scope:
+		include_parts.append(f"`tabGrievance`.assigned_dept = {frappe.db.escape(dept_scope)}")
+	if cat_scope:
+		include_parts.append(f"`tabGrievance`.service_category = {frappe.db.escape(cat_scope)}")
+	if gtype_scope:
+		include_parts.append(f"`tabGrievance`.grievance_type = {frappe.db.escape(gtype_scope)}")
+	if prov_scope:
+		include_parts.append(f"`tabGrievance`.associated_service_provider = {frappe.db.escape(prov_scope)}")
+	if area_scope:
+		area_lft, area_rgt = bounds.get(area_scope, (None, None))
+		if area_lft is not None and area_rgt is not None:
+			include_parts.append(
+				f"(`tabGrievance`.area_lft >= {int(area_lft)} and `tabGrievance`.area_lft <= {int(area_rgt)})"
+			)
+
+	return "(" + " and ".join(include_parts) + ")" if include_parts else None
+
+
 def _scope_clauses(scopes):
 	"""SQL for the cases inside each of `scopes`, one parenthesised clause per scope."""
-	clauses = []
 	bounds = area_bounds(scopes)
-	for scope in scopes:
-		dept_scope = scope.get("department_scope")
-		cat_scope = scope.get("category_scope")
-		gtype_scope = scope.get("grievance_type_scope")
-		prov_scope = scope.get("service_provider_scope")
-		area_scope = scope.get("administrative_area_scope")
+	return [clause for scope in scopes if (clause := _scope_clause(scope, bounds))]
 
-		include_parts = []
 
-		if dept_scope:
-			include_parts.append(f"`tabGrievance`.assigned_dept = {frappe.db.escape(dept_scope)}")
-		if cat_scope:
-			include_parts.append(f"`tabGrievance`.service_category = {frappe.db.escape(cat_scope)}")
-		if gtype_scope:
-			include_parts.append(f"`tabGrievance`.grievance_type = {frappe.db.escape(gtype_scope)}")
-		if prov_scope:
-			include_parts.append(
-				f"`tabGrievance`.associated_service_provider = {frappe.db.escape(prov_scope)}"
-			)
-		if area_scope:
-			area_lft, area_rgt = bounds.get(area_scope, (None, None))
-			if area_lft is not None and area_rgt is not None:
-				include_parts.append(
-					f"(`tabGrievance`.area_lft >= {int(area_lft)} and `tabGrievance`.area_lft <= {int(area_rgt)})"
-				)
+def _team_clauses(user):
+	"""SQL for the cases `user` holds, and for those held below them on a desk of theirs.
 
-		if include_parts:
-			clauses.append("(" + " and ".join(include_parts) + ")")
+	A seat's team counts only on the cases that desk covers (`desk_teams`). A desk that sets no
+	scope covers every case, so its team counts everywhere.
+	"""
+	clauses = [f"`tabGrievance`.assigned_to = {frappe.db.escape(user)}"]
+	teams = desk_teams(user)
+	bounds = area_bounds([seat for seat, _team in teams])
+	for seat, team in teams:
+		held = f"`tabGrievance`.assigned_to in ({_quote(team)})"
+		scoped = _scope_clause(seat, bounds)
+		clauses.append(f"({scoped} and {held})" if scoped else held)
 	return clauses
+
+
+def seat_covers(doc, seat) -> bool:
+	"""Whether the desk seat covers the case. Unlike `_scope_covers`, a seat that sets no scope
+	covers every case: it is a desk for everything, not a reviewer placed nowhere."""
+	scoped = any(
+		seat.get(field)
+		for field in (
+			"department_scope",
+			"category_scope",
+			"grievance_type_scope",
+			"service_provider_scope",
+			"administrative_area_scope",
+		)
+	)
+	return _scope_covers(doc, [seat]) if scoped else True
+
+
+def oversees(user, doc, teams=None) -> bool:
+	"""Whether the case is `user`'s own, or held by an officer below them on a desk of theirs
+	that covers it. `teams` is `desk_teams(user)`, for a caller checking many cases."""
+	assigned = doc.get("assigned_to")
+	if not assigned or not user:
+		return False
+	if assigned == user:
+		return True
+	teams = desk_teams(user) if teams is None else teams
+	return any(assigned in team and seat_covers(doc, seat) for seat, team in teams)
+
+
+def oversees_officer(user, officer, doc) -> bool:
+	"""Whether `officer` sits below `user` on a desk of `user`'s that covers the case."""
+	return bool(officer) and any(
+		officer in team and seat_covers(doc, seat) for seat, team in desk_teams(user)
+	)
 
 
 def _scope_covers(doc, scopes) -> bool:
@@ -247,8 +300,9 @@ def grievance_query_conditions(user=None):
 	"""SQL appended to every Grievance list query. Deny-by-default.
 
 	- Submitters only see their own cases and assisted submissions.
-	- Officers see cases assigned to themselves and cases assigned to subordinate officers in their reporting
-	  chain, and a category admin also sees every case inside their desk's scope.
+	- Officers see cases assigned to themselves and, on each of their desks, the cases that desk
+	  covers held by an officer on a lower rung of it (`desk_teams`). A category admin also sees
+	  every case inside their desk's scope.
 	- Admins see all cases.
 	- Review Officers see the cases in the scopes of the desks they are placed on, and every
 	  case if they were never placed on one.
@@ -288,11 +342,11 @@ def grievance_query_conditions(user=None):
 			f"({_NOT_SENSITIVE} or coalesce(`tabGrievance`.assisted_by_officer, '') = ''))"
 		)
 
-	# Grievance Officer: sees cases assigned to self/subordinates and cases within configured scope
+	# Grievance Officer: their own cases, those held below them on their desks, and a category
+	# admin's whole desk.
 	if ROLE_OFFICER in roles:
 		scope_clauses = _scope_clauses(officer_case_scopes(user))
-		team = get_subordinate_officers(user)
-		scope_clauses.append(f"`tabGrievance`.assigned_to in ({_quote(team)})")
+		scope_clauses.extend(_team_clauses(user))
 		# A case waiting on this officer's ruling, as `has_grievance_permission` allows.
 		scope_clauses.append(
 			"`tabGrievance`.name in (select grievance from `tabGrievance Change Request` "
@@ -356,10 +410,8 @@ def has_grievance_permission(doc, ptype="read", user=None):
 	if ROLE_OFFICER not in roles or barred:
 		return False
 
-	team = get_subordinate_officers(user)
-	assigned = doc.get("assigned_to")
-	if assigned and assigned in team:
-		# Visibility granted for all cases in reporting chain; editing permitted for assignee or supervisor
+	if oversees(user, doc):
+		# The assignee, or an officer above them on the desk that covers the case: both may act.
 		return True
 
 	if ptype == "read" and frappe.db.exists(
@@ -376,10 +428,11 @@ def has_grievance_permission(doc, ptype="read", user=None):
 
 
 def officer_write_check(user=None):
-	"""A test for "may this user act on this case row", with the team read once.
+	"""A test for "may this user act on this case row", with the desk teams read once.
 
 	`has_grievance_permission` does the same per document; a list of rows should not
-	look the reporting chain up again for each one.
+	look the desks up again for each one. A row needs assigned_to, assigned_dept,
+	service_category and administrative_area (area_lft spares a lookup).
 	"""
 	user = user or frappe.session.user
 	roles = set(frappe.get_roles(user))
@@ -387,8 +440,8 @@ def officer_write_check(user=None):
 		return lambda case: True
 	if ROLE_OFFICER not in roles:
 		return lambda case: False
-	team = get_subordinate_officers(user)
-	return lambda case: bool(case.get("assigned_to")) and case.get("assigned_to") in team
+	teams = desk_teams(user)
+	return lambda case: oversees(user, case, teams)
 
 
 def _template_scope_clause(scope):

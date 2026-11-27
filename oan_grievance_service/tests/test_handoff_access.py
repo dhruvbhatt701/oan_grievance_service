@@ -59,6 +59,8 @@ class TestHandoffAccess(FrappeTestCase):
 		super().tearDown()
 
 	def _hand_off(self):
+		"""The nodal officer asks; another department's officer is out of their line, so the move
+		waits for a ruling (here an administrator's, as the receiving desk has no head)."""
 		frappe.set_user(self.nodal)
 		grievance_api.reassign(
 			ticket_number=self.case.ticket_number,
@@ -66,6 +68,10 @@ class TestHandoffAccess(FrappeTestCase):
 			target_officer=self.receiver,
 		)
 		frappe.set_user("Administrator")
+		self.case.reload()
+		self.assertEqual(self.case.assigned_to, self.nodal)
+		res = grievance_api.decide_reassignment(ticket_number=self.case.ticket_number, decision="Approved")
+		self.assertEqual(res["status"], "success", res)
 		self.case.reload()
 		self.assertEqual(self.case.assigned_to, self.receiver)
 

@@ -493,21 +493,38 @@ class TestGrievanceChangeRequest(FrappeTestCase):
 		self.assignment1.reload()
 
 		frappe.set_user(self.officer1)
-		# 1. Within dept
+		# 1a. A colleague at the same level is out of line: it waits for the head, flag or not.
+		sideways = frappe.get_doc(
+			{
+				"doctype": "Grievance Change Request",
+				"grievance": self.grievance.name,
+				"subject": "Sideways within dept",
+				"reason": "Sideways",
+				"changes": [{"fieldname": "assigned_to", "new_value": self.officer2}],
+			}
+		).insert(ignore_permissions=True)
+		self.assertEqual(sideways.status, "Pending")
+		self.assertEqual(sideways.pending_with, self.head)
+		frappe.set_user("Administrator")
+		sideways.decide("Rejected", "Administrator")
+		frappe.set_user(self.officer1)
+
+		# 1b. The next level up is in line: with the flag off it applies directly.
 		cr1 = frappe.get_doc(
 			{
 				"doctype": "Grievance Change Request",
 				"grievance": self.grievance.name,
 				"subject": "Direct move within dept",
 				"reason": "Direct",
-				"changes": [{"fieldname": "assigned_to", "new_value": self.officer2}],
+				"changes": [{"fieldname": "assigned_to", "new_value": self.senior}],
 			}
 		).insert(ignore_permissions=True)
 		self.assertEqual(cr1.status, "Approved")
 		self.grievance.reload()
-		self.assertEqual(self.grievance.assigned_to, self.officer2)
+		self.assertEqual(self.grievance.assigned_to, self.senior)
 
-		# 2. To dept2
+		# 2. To dept2, by the senior, with an officer below them who also sits on dept2's desk.
+		frappe.set_user(self.senior)
 		cr2 = frappe.get_doc(
 			{
 				"doctype": "Grievance Change Request",
@@ -516,6 +533,7 @@ class TestGrievanceChangeRequest(FrappeTestCase):
 				"reason": "Direct across dept",
 				"changes": [
 					{"fieldname": "assigned_dept", "new_value": self.dept2},
+					{"fieldname": "assigned_to", "new_value": self.officer2},
 				],
 			}
 		).insert(ignore_permissions=True)

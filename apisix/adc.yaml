@@ -637,6 +637,7 @@ services:
     - /v1/grievances/:ticket_number/defer-sla/decide
     - /v1/grievances/:ticket_number/duplicate/confirm
     - /v1/grievances/:ticket_number/duplicate/dismiss
+    - /v1/grievances/:ticket_number/escalate
     - /v1/grievances/:ticket_number/reassign
     - /v1/grievances/:ticket_number/reassign/decide
     - /v1/officers

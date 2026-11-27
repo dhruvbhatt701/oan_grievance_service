@@ -215,7 +215,7 @@ class TestOfficerChartScope(FrappeTestCase):
 
 class TestOfficerAssignedCases(FrappeTestCase):
 	"""Below the top rung an officer reads what their case list shows: the cases assigned to
-	them and to everyone who reports to them. Only the top rung also reads the whole desk.
+	them and to the officers below them on their desks. Only the top rung also reads the whole desk.
 
 	Cases c1 and c2 are the nodal officer's, c3 sits on the desk with nobody, c4 is a
 	stranger's, c6 is the desk head's inside the desk and c7 the desk head's outside it.
@@ -309,8 +309,9 @@ class TestOfficerAssignedCases(FrappeTestCase):
 		# Not c3, which sits on their desk with nobody: only the top rung reads a whole desk.
 		self.assertEqual(self._total(self.l1), 2)
 
-	def test_a_supervisor_reads_the_cases_of_the_officers_who_report_to_them(self):
-		self.assertEqual(self._total(self.l2), 2)
+	def test_a_supervisor_off_the_desk_does_not_read_their_reports_cases(self):
+		"""`reports_to` alone grants nothing: only a higher rung on the same desk does (desk_teams)."""
+		self.assertEqual(self._total(self.l2), 0)
 
 	def test_an_officer_does_not_read_a_colleagues_cases(self):
 		self.assertEqual(self._total(self.stranger), 1)
@@ -325,9 +326,12 @@ class TestOfficerAssignedCases(FrappeTestCase):
 			dashboard.caller_scope(self.l1),
 			(dashboard.Clause(level=dashboard.LEVEL_FEDERAL, assigned_to=(self.l1,)),),
 		)
-		# A supervisor with no desk of their own has one clause: themself and who reports to them.
-		(clause,) = dashboard.caller_scope(self.l2)
-		self.assertEqual(set(clause.assigned_to), {self.l1, self.l2})
+		# A supervisor with no desk of their own has one clause: themself. Their reports' cases come
+		# only from a seat above them on the reports' desk.
+		self.assertEqual(
+			dashboard.caller_scope(self.l2),
+			(dashboard.Clause(level=dashboard.LEVEL_WOREDA, assigned_to=(self.l2,)),),
+		)
 
 	def test_a_review_officer_is_not_given_assigned_cases(self):
 		reviewer = a_user_with_role(C.ROLE_REVIEW_OFFICER, "reviewer")

@@ -41,6 +41,7 @@ from oan_grievance_service.api.v1._case_view import (
 )
 from oan_grievance_service.api.v1._options import (
 	active_channels,
+	case_status,
 	expand_status_filter,
 	get_department_officers,
 	get_departments,
@@ -300,6 +301,19 @@ class ReassignGrievanceRequest(BaseModel):
 		if self.target_officer and not (self.target_department or self.target_category):
 			raise ValueError("Specify target_department or target_category when naming target_officer.")
 		return self
+
+
+class EscalateGrievanceRequest(BaseModel):
+	model_config = {"extra": "allow"}
+
+	ticket_number: str | None = None
+	reason: Text = Field(..., min_length=1, max_length=1000)
+	target_officer: str | None = Field(
+		None,
+		min_length=1,
+		description="An officer at the next level up (see /grievances/options with ticket_number). "
+		"Omit to hand the case to the senior a missed deadline would reach",
+	)
 
 
 class DeferSLARequest(BaseModel):
@@ -687,6 +701,8 @@ def list_grievances(
 		"contact_email",
 		"is_anonymous",
 		"administrative_area",
+		# Read by `officer_may_act` to place the case on an officer's desk; not returned.
+		"area_lft",
 		"service_category",
 		"grievance_type",
 		"description",
@@ -767,6 +783,7 @@ def list_grievances(
 			item["can_act"] = deadline["awaiting"] == "officer" and officer_may_act(item)
 		else:
 			item["can_act"] = deadline["awaiting"] == "submitter"
+		item.pop("area_lft", None)
 		held = sla.pause_view(item, timer_cache)
 		item.pop("on_hold_since", None)
 		item["auto_close_at"] = held["auto_close_at"]
@@ -786,7 +803,7 @@ def list_grievances(
 			item["submitter_name"] = _("Anonymous Submitter")
 
 		item["is_anonymous"] = bool(item.get("is_anonymous"))
-		item["status"] = public_status(item.get("status"))
+		item["status"] = case_status(item)
 		sensitive = bool(item.get("is_sensitive"))
 		shown = _classification_view(item, is_staff)
 		for fieldname in ("is_sensitive", "handling_class", "priority"):
@@ -913,6 +930,15 @@ def _assignee_name(doc):
 	return _officer_names([doc.assigned_to]).get(doc.assigned_to)
 
 
+def _assignee_level(doc) -> dict:
+	"""{level, level_name}: the rung the assigned officer holds on the case (`sla.rung_on_case`)."""
+	level = sla.rung_on_case(doc.assigned_to, doc) if doc.assigned_to else None
+	return {
+		"level": level,
+		"level_name": frappe.db.get_value("Grievance Role Level", level, "level_name") if level else None,
+	}
+
+
 def _possible_duplicate(doc):
 	"""What an officer needs to rule on a flag: the best match and how it compares.
 
@@ -934,7 +960,7 @@ def _possible_duplicate(doc):
 	if permissions.has_grievance_permission(main, "read"):
 		view.update(
 			{
-				"status": public_status(main.status),
+				"status": case_status(main),
 				"service_category": main.service_category,
 				"grievance_type": main.grievance_type,
 				"description": main.description,
@@ -974,7 +1000,7 @@ def _current_state(doc, extra=None, as_submitter=False):
 	user = frappe.session.user
 	is_staff = permissions.is_staff(user) and not as_submitter
 	state = {
-		"status": public_status(doc.status),
+		"status": case_status(doc),
 		"escalated": bool(doc.escalated),
 		"assigned_to": doc.assigned_to if is_staff else None,
 		"assigned_to_name": _assignee_name(doc) if is_staff else None,
@@ -1125,7 +1151,7 @@ def submit(**kwargs):
 	return success_response(
 		data={
 			"ticket_number": tn.display(doc.ticket_number),
-			"status": public_status(doc.status),
+			"status": case_status(doc),
 			"workflow_state": doc.workflow_state,
 			"client_submission_uuid": doc.client_submission_uuid,
 			**sensitive_receipt,
@@ -1366,7 +1392,7 @@ def action(
 	return success_response(
 		data={
 			"ticket_number": tn.display(doc.ticket_number),
-			"status": public_status(doc.status),
+			"status": case_status(doc),
 			"action": matching_action,
 			"attachments": attachments,
 			"current_state": current_state,
@@ -1586,6 +1612,8 @@ def timeline(
 				"department": doc.assigned_dept if is_staff or not doc.is_sensitive else None,
 				"assigned_to": doc.assigned_to if is_staff else None,
 				"assigned_to_name": _assignee_name(doc),
+				# The rung the case sits on: its assignee's on a desk covering it. Staff only.
+				**(_assignee_level(doc) if is_staff else {"level": None, "level_name": None}),
 				"routed_automatically": bool(doc.routed_automatically),
 				"active_reassignment_request": active_reassignment_request if is_staff else None,
 			},
@@ -1707,7 +1735,7 @@ def message(
 			"is_internal": bool(entry.is_internal),
 			"author_type": "officer" if is_staff else "submitter",
 			"created_on": to_tz_aware_iso(entry.created_on),
-			"status": public_status(doc.status),
+			"status": case_status(doc),
 			"attachments": attachments,
 			"current_state": _current_state(doc),
 			"timeline_event": _timeline_event_with(entry, doc, attachments),
@@ -1742,7 +1770,7 @@ def _change_response(doc, req, applied_message, pending_message, **extra):
 	return success_response(
 		data={
 			"ticket_number": tn.display(doc.ticket_number),
-			"status": public_status(doc.status),
+			"status": case_status(doc),
 			"change_request": serialize(req),
 			"current_state": current_state,
 			"timeline_event": _format_timeline_event(timeline_entry, doc) if timeline_entry else None,
@@ -1801,6 +1829,61 @@ def reassign(
 			"grievance_type",
 			"sla_due_date",
 		),
+	)
+
+
+@route(
+	"/<ticket_number>/escalate",
+	methods=("POST",),
+	summary="Escalate a grievance to the next level up",
+	tier="officer-core",
+)
+@validate_request(EscalateGrievanceRequest)
+@handle_api_errors
+@require_role(STAFF_ROLES)
+def escalate(ticket_number: str, reason: str, target_officer: str | None = None, **kwargs):
+	"""Hand the case one level up, now, as a missed deadline would.
+
+	Open to whoever may act on the case: its officer, an officer above them on its desk, or an
+	administrator. Only while the case waits on an officer (Assigned, Reopened, In Progress).
+	`target_officer` must be one of the officers at the next level up who can take the case;
+	without it the case goes where a breach would send it. The case is flagged escalated, runs on
+	the new level's SLA days when that level has its own, and the receiving officer is notified.
+	The reason goes on the timeline, which the submitter can read.
+	"""
+	from oan_grievance_service.services import reassignment
+
+	doc = _load(ticket_number, ptype="write")
+	if doc.workflow_state not in (C.STATE_ASSIGNED, C.STATE_REOPENED, C.STATE_IN_PROGRESS):
+		frappe.throw(
+			_("Only a grievance waiting on an officer can be escalated."),
+			frappe.ValidationError,
+			title=_("Action Not Permitted"),
+		)
+	above = reassignment.next_level_officers(doc)
+	if target_officer and target_officer not in above:
+		frappe.throw(
+			_("You can hand this grievance over only to an officer at the next level up."),
+			frappe.ValidationError,
+			title=_("Invalid Officer"),
+		)
+	if not above:
+		frappe.throw(
+			_("Nobody above this level can take the grievance now."),
+			frappe.ValidationError,
+			title=_("No Higher Authority"),
+		)
+	sla.escalate(doc, reason=reason.strip(), target=target_officer or None, event=C.EVENT_MANUAL_ESCALATION)
+	doc.reload()
+	frappe.publish_realtime(
+		"timeline_updated",
+		{"grievance": doc.name, "ticket_number": doc.ticket_number},
+		room=f"doc:Grievance:{doc.name}",
+		after_commit=True,
+	)
+	return success_response(
+		data={"ticket_number": tn.display(doc.ticket_number), "current_state": _current_state(doc)},
+		message=_("Grievance escalated"),
 	)
 
 
@@ -1931,7 +2014,7 @@ def confirm_duplicate(ticket_number: str, main_ticket: str | None = None, note: 
 	return success_response(
 		data={
 			"ticket_number": tn.display(doc.ticket_number),
-			"status": public_status(doc.status),
+			"status": case_status(doc),
 			"duplicate_of": tn.display(doc.duplicate_of),
 			"current_state": _current_state(doc),
 			"timeline_event": _timeline_event_with(entry, doc, []),
@@ -1956,7 +2039,7 @@ def dismiss_duplicate(ticket_number: str, note: str | None = None, **kwargs):
 	return success_response(
 		data={
 			"ticket_number": tn.display(doc.ticket_number),
-			"status": public_status(doc.status),
+			"status": case_status(doc),
 			"current_state": _current_state(doc),
 			"timeline_event": _timeline_event_with(entry, doc, []),
 		},
@@ -2086,23 +2169,31 @@ def options(
 	    grievance_types: Active grievance types (optionally filtered by service_category)
 	    submission_channels: Active intake channels
 	    officers: Active officers under the specified department and/or service category (staff only, present only if either is passed)
+	    can_change_category: With `ticket_number`, for staff: whether the caller may move the case to
+	        another category (administrators, and the fallback desk triaging it)
 
 	With `ticket_number` the officers are the assignees that case can be reassigned to: only
 	officers whose region covers the case's administrative area (the case's own area wins over
 	`administrative_area`), in the case's category unless another is named, and never the
-	category admin (the top rung), who is not an assignee for a reassignment.
+	category admin (the top rung), who is not an assignee for a reassignment. For an officer
+	who is not an administrator they are only the officers the caller may hand the case to
+	(`reassignment.officer_move_limits`): the next level up, which may be the category admin,
+	and for a desk head the officers below them.
 	"""
 	cat = service_category or category
 	exclude_role_levels = None
+	move_limits = None
 	if ticket_number and permissions.is_staff():
 		from oan_grievance_service.grievance_access_control.doctype.grievance_rbac_assignment.grievance_rbac_assignment import (
 			top_rung,
 		)
+		from oan_grievance_service.services import reassignment
 
 		case = _load(ticket_number, ptype="read")
 		administrative_area = case.administrative_area
 		cat = cat or case.service_category
-		exclude_role_levels = {top_rung()} - {None}
+		move_limits = reassignment.officer_move_limits(case, frappe.session.user)
+		exclude_role_levels = {top_rung()} - {None} if move_limits is None else None
 	# One lookup serves both lists, so a short name works for either. An unknown department
 	# matches nothing: no categories and no officers, and no further queries.
 	department_id = find_department(department)
@@ -2125,5 +2216,10 @@ def options(
 			exclude_user=frappe.session.user,
 			exclude_role_levels=exclude_role_levels,
 		)
+		if move_limits is not None:
+			data["officers"] = [off for off in data["officers"] if off["user_id"] in move_limits]
+	if ticket_number and permissions.is_staff():
+		# Whether the reassign form may offer another category or department for this case.
+		data["can_change_category"] = move_limits is None
 
 	return success_response(data=data, message=_("Grievance options fetched successfully"))

@@ -8,8 +8,12 @@ from pydantic import BaseModel, Field
 from oan_grievance_service.api.v1.organization import OrganizationRecord, organization_record
 from oan_grievance_service.grievance_access_control.doctype.grievance_rbac_assignment.grievance_rbac_assignment import (
 	active_scopes,
+	home_seat,
 )
-from oan_grievance_service.permissions import ROLE_OFFICER
+from oan_grievance_service.grievance_masters.doctype.grievance_role_level.grievance_role_level import (
+	GrievanceRoleLevel,
+)
+from oan_grievance_service.permissions import ROLE_OFFICER, ROLE_REVIEW_OFFICER
 from oan_grievance_service.services import constants as C
 from oan_grievance_service.services.administrative_area import (
 	external_area_id,
@@ -31,20 +35,11 @@ def resolve_user_profile_hook(user_doc, roles=None) -> tuple[str, dict | None]:
 	user = user_doc.name
 	user_roles = set(roles or frappe.get_roles(user))
 
-	# 1. Officer Profile (operational bounds from active scopes)
-	if ROLE_OFFICER in user_roles:
-		scopes = active_scopes(user)
-		if scopes:
-			primary_scope = next((s for s in scopes if s.get("is_primary")), scopes[0])
-			level = primary_scope.get("role_level")
-			return "grievance", {
-				"type": (level and frappe.db.get_value("Grievance Role Level", level, "level_name"))
-				or level
-				or ROLE_OFFICER,
-				"department": primary_scope.get("department_scope"),
-				"administrative_area": external_area_id(primary_scope.get("administrative_area_scope")),
-				"category": primary_scope.get("category_scope"),
-			}
+	# 1. Officer or Reviewer Profile (operational bounds from active scopes)
+	if user_roles & {ROLE_OFFICER, ROLE_REVIEW_OFFICER}:
+		profile = _staff_profile(user, ROLE_OFFICER in user_roles)
+		if profile:
+			return "grievance", profile
 
 	# 2. Submitter Profile (citizen / organization identity attributes)
 	fields = [
@@ -120,6 +115,35 @@ def resolve_user_profile_hook(user_doc, roles=None) -> tuple[str, dict | None]:
 		}
 
 	return "grievance", None
+
+
+def _staff_profile(user, is_officer) -> dict | None:
+	"""The `/me` grievance profile of an officer or a Reviewer, from their live desk seats.
+
+	`department`, `category` and `administrative_area` are their own desk's (`home_seat`): an
+	officer who co-handles another department's category still belongs to theirs. An officer's
+	reviewer seats do not count. `departments` and `service_categories` list every desk they sit
+	on. A Reviewer gets a profile even before they are placed on a desk, so the portal has a
+	role to land them on; an officer on no desk gets none, as before.
+	"""
+	scopes = active_scopes(user)
+	if is_officer:
+		chain = {rung.name for rung in GrievanceRoleLevel.get_chain()}
+		scopes = [scope for scope in scopes if scope.get("role_level") in chain]
+		if not scopes:
+			return None
+	home = home_seat(scopes) or {}
+	level = home.get("role_level")
+	return {
+		"type": (level and frappe.db.get_value("Grievance Role Level", level, "level_name"))
+		or level
+		or (ROLE_OFFICER if is_officer else ROLE_REVIEW_OFFICER),
+		"department": home.get("department_scope"),
+		"administrative_area": external_area_id(home.get("administrative_area_scope")),
+		"category": home.get("category_scope"),
+		"departments": sorted({s.department_scope for s in scopes if s.get("department_scope")}),
+		"service_categories": sorted({s.category_scope for s in scopes if s.get("category_scope")}),
+	}
 
 
 class RegistrationExtras(BaseModel):

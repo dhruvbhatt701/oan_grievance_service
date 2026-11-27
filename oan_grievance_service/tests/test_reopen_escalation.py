@@ -102,10 +102,11 @@ class TestReopenWithEscalation(FrappeTestCase):
 		)
 
 	def _reopen_recipients(self, name):
+		"""Who got the officer's Grievance Reopened. The submitter's SMS (N8) is checked on its own."""
 		return set(
 			frappe.get_all(
 				"Grievance Notification Log",
-				filters={"grievance": name, "event": C.EVENT_REOPENED},
+				filters={"grievance": name, "event": C.EVENT_REOPENED, "channel": ["!=", "SMS"]},
 				pluck="recipient",
 			)
 		)

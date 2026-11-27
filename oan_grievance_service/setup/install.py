@@ -512,6 +512,24 @@ NOTIFICATION_EVENTS = [
 		(),
 	),
 	(
+		# N8 of the Routing Matrix: who looks at the case again, and the new expected date. The
+		# office, never the officer. A sensitive case gets only its reference and PIN
+		# (`notifications.sensitive_submitter_text`).
+		C.EVENT_REOPENED,
+		"Grievance Reopened for Submitter",
+		"Submitter",
+		("SMS",),
+		"Submitter reopens",
+		{
+			"text": "Your grievance {0} has been reopened and will be examined again by {1}.",
+			"args": ("doc.ticket_number", PLACEHOLDER_EXPRESSIONS["department"]),
+			"if": "doc.sla_due_date",
+			"then": ("Expected response by {0}.", (PLACEHOLDER_EXPRESSIONS["sla_due_date"],)),
+			"else": ("", ()),
+		},
+		(),
+	),
+	(
 		C.EVENT_SLA_REMINDER_20,
 		"SLA Reminder 20%",
 		"Assigned Officer",
@@ -561,8 +579,9 @@ NOTIFICATION_EVENTS = [
 		"Manual Escalation",
 		"Department Head",
 		("Email", "System Notification"),
-		"Submitter triggers escalation",
-		"Grievance {0} has been escalated by the submitter.",
+		# Sent to the officer the case is handed to (`sla.escalate` names them).
+		"Officer escalates to the next level",
+		"Grievance {0} has been escalated to you and needs attention.",
 		("doc.ticket_number",),
 	),
 	(

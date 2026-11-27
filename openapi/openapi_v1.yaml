@@ -1111,6 +1111,80 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ReassignGrievanceRequest'
+  /api/v1/grievances/{ticket_number}/escalate:
+    post:
+      tags:
+      - Grievances Core
+      summary: Escalate a grievance to the next level up
+      description: 'Hand the case one level up, now, as a missed deadline would.
+
+
+        Open to whoever may act on the case: its officer, an officer above them on its desk, or an
+
+        administrator. Only while the case waits on an officer (Assigned, Reopened, In Progress).
+
+        `target_officer` must be one of the officers at the next level up who can take the case;
+
+        without it the case goes where a breach would send it. The case is flagged escalated, runs on
+
+        the new level''s SLA days when that level has its own, and the receiving officer is notified.
+
+        The reason goes on the timeline, which the submitter can read.'
+      operationId: post_api_v1_grievances_ticket_number_escalate
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrievanceActionResultResponse'
+        '400':
+          description: Validation or Bad Input Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '401':
+          description: Unauthorized / Authentication Required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '403':
+          description: Forbidden / Insufficient Role Scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '404':
+          description: Resource Not Found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+      parameters:
+      - name: ticket_number
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Unique grievance ticket number (e.g. 3-001-002A-0 or 3001002A0)
+      x-legacy-rpc-method: oan_grievance_service.api.v1.grievance.escalate
+      x-gateway-tier: officer-core
+      security:
+      - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EscalateGrievanceRequest'
   /api/v1/grievances/{ticket_number}/reassign/decide:
     post:
       tags:
@@ -1581,10 +1655,15 @@ paths:
         \ desk (only the department's when `department` is given)\n    grievance_types: Active grievance\
         \ types (optionally filtered by service_category)\n    submission_channels: Active intake channels\n\
         \    officers: Active officers under the specified department and/or service category (staff only,\
-        \ present only if either is passed)\n\nWith `ticket_number` the officers are the assignees that\
+        \ present only if either is passed)\n    can_change_category: With `ticket_number`, for staff:\
+        \ whether the caller may move the case to\n        another category or department (administrators,\
+        \ and the fallback desk triaging it)\n\nWith `ticket_number` the officers are the assignees that\
         \ case can be reassigned to: only\nofficers whose region covers the case's administrative area\
         \ (the case's own area wins over\n`administrative_area`), in the case's category unless another\
-        \ is named, and never the\ncategory admin (the top rung), who is not an assignee for a reassignment."
+        \ is named, and never the\ncategory admin (the top rung), who is not an assignee for a reassignment.\
+        \ For an officer\nwho is not an administrator they are only the officers the caller may hand the\
+        \ case to\n(`reassignment.officer_move_limits`): the next level up, which may be the category\
+        \ admin,\nand for a desk head the officers below them."
       operationId: get_api_v1_grievances_options
       responses:
         '200':
@@ -11904,6 +11983,23 @@ components:
           type: string
           default: null
           nullable: true
+      type: object
+    EscalateGrievanceRequest:
+      additionalProperties: true
+      properties:
+        reason:
+          maxLength: 1000
+          minLength: 1
+          type: string
+        target_officer:
+          minLength: 1
+          type: string
+          default: null
+          description: An officer at the next level up (see /grievances/options with ticket_number). Omit
+            to hand the case to the senior a missed deadline would reach
+          nullable: true
+      required:
+      - reason
       type: object
     DecideReassignmentRequest:
       additionalProperties: true

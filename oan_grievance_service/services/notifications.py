@@ -734,18 +734,20 @@ def queue(grievance, event_code, recipient_override=None, dispatch_now=True):
 			or RECIPIENT_SUBMITTER
 		)
 		role_level = notification.get("grievance_role_level")
+		to_submitter = recipient_role == RECIPIENT_SUBMITTER
+		# An override names the officer for every officer-facing template of the event (the one a
+		# case is escalated or reassigned to). A template for the submitter still goes to the
+		# submitter: the reopen's officer notice and its N8 SMS are one event.
 		recipient = resolve_recipient(
 			grievance,
 			recipient_role,
 			role_level=role_level,
-			override=recipient_override,
+			override=None if to_submitter else recipient_override,
 		)
 		if not recipient:
 			continue
 
 		sensitive = bool(grievance.get("is_sensitive"))
-		# An override names an officer whatever the template's recipient says (escalation).
-		to_submitter = recipient_role == RECIPIENT_SUBMITTER and not recipient_override
 		if sensitive and not to_submitter and _is_kebele_level_user(recipient):
 			# A sensitive case is never mentioned to a Kebele-level officer.
 			continue

@@ -140,8 +140,9 @@ def caller_scope(user=None):
 	Mirrors permissions.grievance_query_conditions, as far as the rollups can. They are
 	grouped by region, category, department and assignee (Grievance Stat Area also by woreda), so:
 
-	- A Grievance Officer reads the cases assigned to them or to anyone who reports to them,
-	  whatever their rung, as their case list does. A Category Admin also reads their desks.
+	- A Grievance Officer reads the cases assigned to them and, on each desk of theirs, the cases
+	  of that desk held by an officer on a lower rung, as their case list does. A Category Admin
+	  also reads their desks.
 	  Without this an officer below the top rung read nothing, though their case list showed
 	  cases.
 	- A desk's area counts as the Regions inside it. A desk on a Zone or a Woreda has no
@@ -174,18 +175,17 @@ def caller_scope(user=None):
 		scopes = placements
 	else:
 		scopes = perms.officer_case_scopes(user, placements)
-	clauses = []
-	for scope in scopes:
-		if scope.grievance_type_scope or scope.service_provider_scope:
-			continue
-		if not (scope.administrative_area_scope or scope.department_scope or scope.category_scope):
-			continue
+
+	def desk_clause(scope, assigned_to=None):
+		"""The scope as a Clause, or None when the rollups cannot honour it."""
+		if scope.get("grievance_type_scope") or scope.get("service_provider_scope"):
+			return None
 		regions = woredas = None
 		level = LEVEL_FEDERAL
-		if scope.administrative_area_scope:
+		if scope.get("administrative_area_scope"):
 			area = areas.get(scope.administrative_area_scope)
 			if not area:
-				continue
+				return None
 			regions = regions_of(area)
 			if regions:
 				level = LEVEL_FEDERAL if area.level_name == C.AREA_LEVEL_COUNTRY else LEVEL_REGION
@@ -193,14 +193,30 @@ def caller_scope(user=None):
 				regions, woredas = None, rollup_keys_within(C.AREA_LEVEL_WOREDA, area)
 				level = LEVEL_WOREDA
 				if not woredas:
-					continue
-		clauses.append(
-			Clause(regions, scope.category_scope or None, scope.department_scope or None, woredas, level)
+					return None
+		return Clause(
+			regions,
+			scope.get("category_scope") or None,
+			scope.get("department_scope") or None,
+			woredas,
+			level,
+			assigned_to,
 		)
+
+	clauses = []
+	for scope in scopes:
+		if not (scope.administrative_area_scope or scope.department_scope or scope.category_scope):
+			continue
+		if clause := desk_clause(scope):
+			clauses.append(clause)
 	if perms.ROLE_OFFICER in roles:
-		# The officer and everyone below them in the reporting chain, as the case list reads it.
-		team = tuple(sorted(perms.get_subordinate_officers(user)))
-		clauses.append(Clause(level=_placement_level(placements, areas, regions_of), assigned_to=team))
+		# The officer's own cases, and on each desk the cases held below them, as the case list
+		# reads them (`permissions.desk_teams`).
+		clauses.append(Clause(level=_placement_level(placements, areas, regions_of), assigned_to=(user,)))
+		# Seats are among the placements, so their areas are already read.
+		for seat, team in perms.desk_teams(user):
+			if clause := desk_clause(seat, tuple(sorted(team))):
+				clauses.append(clause)
 	return tuple(dict.fromkeys(clauses))
 
 

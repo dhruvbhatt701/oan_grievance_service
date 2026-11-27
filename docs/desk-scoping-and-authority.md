@@ -54,6 +54,15 @@ A desk with **no field set at all** grants no read access (`_scope_covers`: a sc
 field set covers nothing). Exception: if the officer row has an `administrative_area`, the area
 is the only clause and the officer reads every case in that area.
 
+### Who reads a case below the top rung (`desk_teams`)
+
+An officer below the category admin reads their own cases and, on each desk they sit on, the
+cases that desk covers (department, category, and their row's area) held by an officer on a
+lower rung of that same desk. `reports_to` plays no part: it names one supervisor for the whole
+person, so following it leaked one desk's cases to a supervisor on another (a Kebele head on seven
+desks) and hid a case from a second specialist at the same rung. The same rule decides who may act
+on the case, the case list's `can_act` and the dashboard scope.
+
 ## 3. Authority lookups: `covering_rows`
 
 Every "who holds this rung for this case" question goes through

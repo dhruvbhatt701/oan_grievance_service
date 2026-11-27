@@ -689,13 +689,13 @@ class TestGrievanceCategoryAssignment(FrappeTestCase):
 			row.user: row.reports_to for row in frappe.get_doc("Grievance RBAC Assignment", name).officers
 		}
 		self.assertEqual(reports_to, {self.l1: self.l2, self.l2: None})
-		from oan_grievance_service.permissions import get_subordinate_officers
+		from oan_grievance_service.permissions import desk_teams
 		from oan_grievance_service.services import sla
 
 		self.assertEqual(sla.get_officer_supervisor(self.l1, department=self.department), self.l2)
 		self.assertIsNone(sla.get_officer_supervisor(self.l2, department=self.department))
-		self.assertIn(self.l1, get_subordinate_officers(self.l2))
-		self.assertNotIn(self.l2, get_subordinate_officers(self.l1))
+		self.assertIn(self.l1, {user for _seat, team in desk_teams(self.l2) for user in team})
+		self.assertEqual(desk_teams(self.l1), [])
 
 		update_assignment(name, l2_officer=None)
 		rows = frappe.get_doc("Grievance RBAC Assignment", name).officers

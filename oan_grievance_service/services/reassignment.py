@@ -10,17 +10,31 @@ Rules:
   officer on an "Other" desk (the receiving category's head does not rule),
   or if the user is the head of the target department.
 - Category and type follow receiving desks; SLA restarts if category changed.
+- What an officer may move (`check_officer_move`, `officer_move_limits`): an administrator moves
+  anything, and the fallback desk triages a case to its real category. Every other officer keeps
+  the category. The officers in line for a case are the next level up and those below the
+  requester on a desk covering it; a move to anyone else (a colleague at the same level, an
+  officer of another department) always waits for the receiving head, never applies directly.
 """
 
 import frappe
 from frappe import _
 
 from oan_grievance_service.grievance_access_control.doctype.grievance_rbac_assignment.grievance_rbac_assignment import (
+	covering_rows,
 	department_head_of,
-	get_subordinate_officers,
 	query_active_officer_assignments,
 )
-from oan_grievance_service.permissions import is_department_head, is_unrestricted
+from oan_grievance_service.grievance_masters.doctype.grievance_role_level.grievance_role_level import (
+	GrievanceRoleLevel,
+)
+from oan_grievance_service.permissions import (
+	desk_teams,
+	is_department_head,
+	is_unrestricted,
+	oversees_officer,
+	seat_covers,
+)
 from oan_grievance_service.services import audit, notifications
 from oan_grievance_service.services import constants as C
 from oan_grievance_service.services.routing import (
@@ -114,31 +128,134 @@ def may_decide(user, grievance, request) -> bool:
 	"""Whether `user` may directly approve this reassignment without waiting for higher authority."""
 	if is_unrestricted(user):
 		return True
+	target_dept = target_department(grievance, request)
+	head_of_target = is_department_head(
+		user, target_dept, grievance.administrative_area, category=target_category(grievance, request)
+	)
+	# A pick outside the line (a same-level colleague, another department's officer) is the
+	# receiving head's to approve, whatever the desk's flag says.
+	if out_of_line(user, grievance, request):
+		return head_of_target
 	if not desk_requires_approval(grievance):
 		return True
 	# The fallback ("Other") desk triages: its officers send a case on to its real category with
 	# no ruling from that category's head. Nobody else gets this.
-	if (
-		grievance.service_category == C.FALLBACK_SERVICE_CATEGORY
-		and target_category(grievance, request) != grievance.service_category
-		and _sits_on_fallback_desk(user)
+	if target_category(grievance, request) != grievance.service_category and _triages_from_fallback(
+		user, grievance
 	):
 		return True
-	target_dept = target_department(grievance, request)
-	if target_dept == grievance.assigned_dept and _hands_down_to_subordinate(user, request):
+	if target_dept == grievance.assigned_dept and _hands_down_to_subordinate(user, grievance, request):
 		return True
-	return is_department_head(
-		user, target_dept, grievance.administrative_area, category=target_category(grievance, request)
+	return head_of_target
+
+
+def _hands_down_to_subordinate(user, grievance, request) -> bool:
+	"""Whether the request names an officer below `user` on a desk of theirs covering the case."""
+	officer = _named_officer(request)
+	return bool(officer) and officer != user and oversees_officer(user, officer, grievance)
+
+
+def _triages_from_fallback(user, grievance) -> bool:
+	"""Whether `user` sits on the fallback desk and the case is still in the fallback category."""
+	return grievance.service_category == C.FALLBACK_SERVICE_CATEGORY and _sits_on_fallback_desk(user)
+
+
+def next_level_officers(grievance) -> frozenset:
+	"""The officers one level above the case's holder who can take it now.
+
+	The lowest rung above the holder's (`sla.rung_on_case`; an unassigned case starts below the
+	first rung) with at least one officer on a desk covering the case who can take it
+	(`sla.can_take_escalation`). A vacant rung, or one whose officers are all on leave, is
+	skipped, as breach escalation skips it. Empty at the top of the chain.
+	"""
+	from oan_grievance_service.services import sla
+
+	chain = GrievanceRoleLevel.get_chain()
+	rank = {rung.name: index for index, rung in enumerate(chain)}
+	holder = grievance.get("assigned_to")
+	start = rank.get(sla.rung_on_case(holder, grievance), -1) + 1 if holder else 0
+	rows = covering_rows(
+		query_active_officer_assignments(
+			fields=lambda c, p, u: [
+				c.user,
+				c.role_level,
+				c.administrative_area.as_("administrative_area_scope"),
+				p.department_scope,
+				p.category_scope,
+			],
+			order_by=None,
+			department=grievance.assigned_dept,
+			category=grievance.service_category,
+		),
+		grievance.assigned_dept,
+		grievance.service_category,
+		grievance.administrative_area,
 	)
+	for rung in chain[start:]:
+		officers = frozenset(
+			row.user
+			for row in rows
+			if row.role_level == rung.name
+			and row.user
+			and row.user != holder
+			and sla.can_take_escalation(row.user, grievance)
+		)
+		if officers:
+			return officers
+	return frozenset()
 
 
-def _hands_down_to_subordinate(user, request) -> bool:
-	"""Whether the request names an officer who reports to `user`, directly or further down."""
+def officer_move_limits(grievance, user) -> frozenset | None:
+	"""The officers in line for `user` to hand the case to, or None when the desks alone decide.
+
+	None for an administrator, and for an officer on the fallback desk triaging a case still in
+	the fallback category. For any other officer: the next level up (`next_level_officers`) and
+	the officers below them on a desk of theirs covering the case. These are what the reassign
+	picker offers. A move to anyone else is not refused, but always waits for the receiving head
+	(`may_decide`).
+	"""
+	if is_unrestricted(user) or _triages_from_fallback(user, grievance):
+		return None
+	allowed = set(next_level_officers(grievance))
+	for seat, team in desk_teams(user):
+		if seat_covers(grievance, seat):
+			allowed |= team
+	return frozenset(allowed)
+
+
+def _named_officer(request):
 	for r in getattr(request, "changes", None) or []:
 		if getattr(r, "fieldname", None) == "assigned_to":
-			officer = r.new_value
-			return bool(officer) and officer != user and officer in get_subordinate_officers(user)
-	return False
+			return r.new_value
+	return None
+
+
+def out_of_line(user, grievance, request) -> bool:
+	"""Whether the request names an officer outside `officer_move_limits` for `user`."""
+	officer = _named_officer(request)
+	if not officer:
+		return False
+	limits = officer_move_limits(grievance, user)
+	return limits is not None and officer not in limits
+
+
+def check_officer_move(grievance, request):
+	"""Refuse a category change by an officer: a misfiled case goes to an administrator.
+
+	Administrators, and the fallback desk triaging a case to its real category, are exempt. A
+	department move stays open to officers, decided by the receiving head as before.
+	"""
+	user = request.requested_by
+	if is_unrestricted(user) or _triages_from_fallback(user, grievance):
+		return
+	if any(
+		getattr(r, "fieldname", None) == "service_category" for r in getattr(request, "changes", None) or []
+	):
+		frappe.throw(
+			_("Only an administrator can move a grievance to another category."),
+			frappe.PermissionError,
+			title=_("Change Not Permitted"),
+		)
 
 
 def _sits_on_fallback_desk(user) -> bool:
@@ -391,6 +508,8 @@ def validate(grievance, request):
 			title=_("Invalid Officer"),
 		)
 
+	check_officer_move(grievance, request)
+
 	if not is_unrestricted(request.requested_by) and proposed_officer:
 		desks = officer_desks(grievance, proposed_dept, proposed_officer)
 		accepting = [
@@ -470,6 +589,14 @@ def on_applied(grievance, request):
 
 	officer_row = next((r for r in changes if getattr(r, "fieldname", None) == "assigned_to"), None)
 	dept_row = next((r for r in changes if getattr(r, "fieldname", None) == "assigned_dept"), None)
+
+	if officer_row and officer_row.new_value and "service_category" not in changed:
+		# Handed to another level: the case runs on that level's SLA days, as an escalation does.
+		# A category change has already restarted the window on the new assignee's level.
+		old_rung = sla.rung_on_case(officer_row.old_value, grievance) if officer_row.old_value else None
+		new_rung = sla.rung_on_case(officer_row.new_value, grievance)
+		if new_rung and new_rung != old_rung:
+			sla.start_level_window(grievance, new_rung)
 
 	if officer_row and officer_row.new_value:
 		if officer_row.new_value != request.decided_by:

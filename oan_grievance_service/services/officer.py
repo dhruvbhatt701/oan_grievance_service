@@ -41,6 +41,7 @@ from pypika.functions import Max
 from pypika.terms import Case
 
 from oan_grievance_service.grievance_access_control.doctype.grievance_rbac_assignment.grievance_rbac_assignment import (
+	home_seat,
 	top_rung,
 )
 from oan_grievance_service.grievance_masters.doctype.grievance_role_level.grievance_role_level import (
@@ -618,6 +619,14 @@ def records(user_ids: list[str]) -> list[dict]:
 			"User", filters={"name": ["in", list(set(user_ids) | supervisors)]}, fields=fields
 		)
 	}
+	# How many officers hold each rung of each desk, for `home_seat`, in one query.
+	sharing = defaultdict(int)
+	for seat in frappe.get_all(
+		ROW,
+		filters={"parent": ["in", list({row.parent for row in rows})], "parenttype": DESK, "active": 1},
+		fields=["parent", "role_level"],
+	):
+		sharing[(seat.parent, seat.role_level)] += 1
 	area_names = {
 		area.name: area.area_name
 		for area in frappe.get_all(
@@ -641,6 +650,8 @@ def records(user_ids: list[str]) -> list[dict]:
 		role = DEFAULT_ROLE if any(row.role_level in CODE_LEVELS for row in every) else REVIEWER_ROLE
 		own = [row for row in every if row.role_level in ROLE_CODES[role]]
 		top = max(own, key=lambda row: row.level_order)
+		# Their own department, not that of a desk they co-handle (`home_seat`).
+		home = home_seat([row for row in own if row.active] or own, sharing) or top
 		region = next((row.administrative_area for row in own if row.administrative_area), None)
 		supervisor = next((row.reports_to for row in own if row.reports_to), None)
 		records.append(
@@ -650,7 +661,7 @@ def records(user_ids: list[str]) -> list[dict]:
 				"role": role,
 				"designation": next((row.designation for row in own if row.designation), None),
 				"level": CODE_LEVELS.get(top.role_level),
-				"department": top.department_scope,
+				"department": home.department_scope,
 				"email": login_email(person),
 				"phone": person.phone,
 				"must_change_password": bool(person.get(MUST_CHANGE_PASSWORD_FIELD)),

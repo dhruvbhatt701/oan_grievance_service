@@ -303,6 +303,23 @@ def sla_days_for(service_category: str | None, grievance=None) -> int | None:
 	return (rule.sla_days or None) if rule else None
 
 
+def level_sla_days(service_category: str | None, grievance, role_level: str | None) -> int | None:
+	"""The SLA days of the rung's own rules for the case (Routing Matrix SLA L1 / L2), or None.
+
+	Matched like the case's rules (type, area, filing date), among the rules naming `role_level`.
+	None when the rung has no rule for the case: the case then runs on the category's days.
+	"""
+	if not (service_category and role_level and grievance is not None):
+		return None
+	rule = match_rule(
+		rules_of(service_category, role_level=role_level),
+		grievance.get("grievance_type"),
+		grievance.get("administrative_area"),
+		getdate(grievance.get("creation") or now_datetime()),
+	)
+	return (rule.sla_days or None) if rule else None
+
+
 def is_base(rule) -> bool:
 	"""A rule that names no level, type, area or window: the category's SLA everywhere else."""
 	return not (

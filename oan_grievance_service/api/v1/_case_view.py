@@ -17,7 +17,7 @@ from frappe.utils import get_datetime
 from oan_auth_service.api.utils import to_tz_aware_iso
 
 from oan_grievance_service import permissions
-from oan_grievance_service.api.v1._options import public_status
+from oan_grievance_service.api.v1._options import case_status
 from oan_grievance_service.services import constants as C
 from oan_grievance_service.services import response_body, timeline_changes
 from oan_grievance_service.services import ticket_number as tn
@@ -392,7 +392,7 @@ def case_summary(doc, area_hierarchy=None) -> dict:
 	)
 	return {
 		"ticket_number": tn.display(doc.ticket_number),
-		"status": public_status(doc.status),
+		"status": case_status(doc),
 		"description": doc.description,
 		"desired_outcome": doc.desired_outcome,
 		"service_category": doc.service_category,

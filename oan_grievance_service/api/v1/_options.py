@@ -382,18 +382,34 @@ def get_status_options() -> list[dict]:
 	return _status_cards()
 
 
-def public_status(workflow_status: str | None) -> str:
+# Shown instead of the stage while an escalated case waits on an officer. Not a workflow state
+# and not a queue card: the `escalated` flag stays the record, and the `escalated` list filter
+# finds these cases.
+STATUS_ESCALATED = "Escalated"
+_ESCALATED_SHOWN_IN = frozenset({C.STATE_ASSIGNED, C.STATE_REOPENED, C.STATE_IN_PROGRESS})
+
+
+def public_status(workflow_status: str | None, escalated: bool = False) -> str:
 	"""The queue status a workflow state is shown as.
 
 	Unknown open states are In Progress. Assigned maps to itself for staff and to
-	In Progress for submitters (who do not get an Assigned KPI card).
+	In Progress for submitters (who do not get an Assigned KPI card). An `escalated` case is
+	shown as Escalated while it waits on an officer (Assigned, Reopened, In Progress); while it
+	waits on the submitter, or once it is decided, it shows its stage.
 	"""
 	if not workflow_status:
 		return ""
+	if escalated and workflow_status in _ESCALATED_SHOWN_IN:
+		return STATUS_ESCALATED
 	canonical = _canonical_status(workflow_status)
 	if canonical == "Assigned" and not is_staff():
 		return "In Progress"
 	return canonical or "In Progress"
+
+
+def case_status(case) -> str:
+	"""`public_status` of a Grievance, or of a row with its `status` and `escalated`."""
+	return public_status(case.get("status"), bool(case.get("escalated")))
 
 
 def expand_status_filter(values: list[str]) -> list[str] | None:

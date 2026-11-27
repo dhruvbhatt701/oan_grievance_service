@@ -10,6 +10,8 @@ What does not belong here: deciding whether a user may see or act on a case. The
 functions return facts; permissions.py turns them into access rules.
 """
 
+from collections import defaultdict
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -237,11 +239,13 @@ def query_active_officer_assignments(
 	limit=None,
 	include_reviewers=False,
 	distinct=False,
+	assignments=None,
 ):
 	"""Consolidated query builder for active Grievance RBAC Assignments & Officers.
 
 	`fields` and `order_by` take the officer row `c`, its desk `p` and, with
 	`include_user_details`, the `User` `u`; `order_by` returns (column, Order) pairs.
+	`assignments` limits the rows to those desks.
 
 	A Reviewer's rows are left out unless `include_reviewers`: a Reviewer is on a desk to read
 	it, so is no assignee, supervisor or rung. Their own scopes are read with `active_scopes`.
@@ -272,6 +276,8 @@ def query_active_officer_assignments(
 		query = query.where(c.role_level == role_level)
 	if reports_to_list:
 		query = query.where(c.reports_to.isin(list(reports_to_list)))
+	if assignments is not None:
+		query = query.where(p.name.isin(list(assignments) or [""]))
 	if department:
 		query = query.where(_matches_or_unscoped(p.department_scope, department))
 	if category:
@@ -408,25 +414,88 @@ def holds_rung(user, role_level, department=None, area=None, category=None):
 	return bool(covering_rows(rows, department, category, area))
 
 
-def get_subordinate_officers(user):
-	"""Find all officers who report directly or indirectly to `user` (bottom-to-top hierarchy)."""
+def desk_teams(user) -> list[tuple[dict, frozenset]]:
+	"""(seat, team) for each live desk seat of `user` above the most junior rung.
+
+	`seat` is the user's row on the desk with the desk's scope (department, category, type,
+	provider, and the row's area as `administrative_area_scope`). `team` is every officer on that
+	same desk on a lower rung, whoever their row reports to.
+
+	Only the desk counts. A row's `reports_to` names one supervisor for the whole person, so
+	following it reached the cases an officer works on other desks (a Kebele head on seven desks
+	showed their Land cases to the Credit officer they report to on the Credit desk), and missed a
+	second specialist at the same rung (the Veterinarian next to the Livestock SMS).
+	"""
 	if not user:
-		return set()
-	subordinates = {user}
-	frontier = {user}
-	while frontier:
-		rows = query_active_officer_assignments(
-			reports_to_list=frontier,
-			fields=lambda c, p, u: [c.user],
+		return []
+	rank = {rung.name: index for index, rung in enumerate(GrievanceRoleLevel.get_chain())}
+	seats = [
+		seat
+		for seat in query_active_officer_assignments(
+			user=user,
+			fields=lambda c, p, u: [
+				p.name.as_("assignment_name"),
+				c.role_level,
+				c.administrative_area.as_("administrative_area_scope"),
+				p.department_scope,
+				p.category_scope,
+				p.grievance_type_scope,
+				p.service_provider_scope,
+			],
 			order_by=None,
-			distinct=True,
 		)
-		new_users = {r.user for r in rows if r.user and r.user not in subordinates}
-		if not new_users:
-			break
-		subordinates.update(new_users)
-		frontier = new_users
-	return subordinates
+		if rank.get(seat.role_level, 0) > 0
+	]
+	if not seats:
+		return []
+	on_desk = defaultdict(list)
+	for row in query_active_officer_assignments(
+		assignments={seat.assignment_name for seat in seats},
+		fields=lambda c, p, u: [p.name.as_("assignment_name"), c.user, c.role_level],
+		order_by=None,
+	):
+		if row.user and row.role_level in rank:
+			on_desk[row.assignment_name].append(row)
+	teams = []
+	for seat in seats:
+		team = frozenset(
+			row.user
+			for row in on_desk[seat.assignment_name]
+			if rank[row.role_level] < rank[seat.role_level] and row.user != user
+		)
+		if team:
+			teams.append((seat, team))
+	return teams
+
+
+def home_seat(rows, sharing=None):
+	"""The desk row that names an officer's own department among their rows, or None.
+
+	An officer may co-handle another department's category (the Cooperative officer on the
+	Crop Production inputs desk). Their own desk is the one they are primary on; else one where
+	nobody else holds their rung, the desk they are the specialist for; else the highest rung,
+	then the first desk by name. `sharing` maps (desk, rung) to how many officers hold it; it is
+	read here when not given.
+	"""
+	if not rows:
+		return None
+	if sharing is None:
+		desks = {row.get("assignment_name") or row.get("parent") for row in rows}
+		sharing = defaultdict(int)
+		for row in frappe.get_all(
+			"Grievance RBAC Assignment Officer",
+			filters={"parent": ["in", list(desks)], "parenttype": "Grievance RBAC Assignment", "active": 1},
+			fields=["parent", "role_level"],
+		):
+			sharing[(row.parent, row.role_level)] += 1
+	rank = {rung.name: index for index, rung in enumerate(GrievanceRoleLevel.get_chain())}
+
+	def key(row):
+		desk = row.get("assignment_name") or row.get("parent") or ""
+		alone = sharing.get((desk, row.get("role_level")), 0) <= 1
+		return (not row.get("is_primary"), not alone, -rank.get(row.get("role_level"), -1), desk)
+
+	return min(rows, key=key)
 
 
 def current_level_of(user):

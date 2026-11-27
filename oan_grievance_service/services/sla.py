@@ -136,18 +136,25 @@ def calculate_working_deadline(start_datetime, sla_days: int, holiday_list_name:
 	return cur_dt
 
 
-def resolve_policy(service_category, grievance=None) -> SLAPolicy:
+def resolve_policy(service_category, grievance=None, level=None) -> SLAPolicy:
 	"""The SLA days of the category's rules, with the flags of the desk that routed `grievance`.
 
-	The days come only from the category's Grievance SLA Rules (`classification.sla_days_for`).
-	With `grievance`, they are the rule that matches the case (its type, area and filing date),
-	for example 3 days in season against 15 out of it; without it, the base rule's. A category
-	with no rule has 0 days: no deadline.
+	The days come only from the category's Grievance SLA Rules. A case's window is the days of
+	the rung it sits on (`level`, else its assignee's rung on the case) when that rung has a rule
+	for it (`classification.level_sla_days`: the Routing Matrix's SLA L1 and SLA L2), so a case
+	climbs one level when that rung's window runs out. Otherwise the rule that matches the case
+	(its type, area and filing date, `classification.sla_days_for`), for example 3 days in season
+	against 15 out of it; without a `grievance`, the base rule's. A category with no rule has
+	0 days: no deadline.
 
 	Auto-escalate and notify-on-breach are the desk's (`grievance.routing_rule`). A case no desk
 	has routed yet, or no `grievance`, has both on. Working days skip the default holiday list.
 	"""
 	from oan_grievance_service.services import classification
+
+	if grievance is not None and level is None and grievance.get("assigned_to"):
+		level = rung_on_case(grievance.get("assigned_to"), grievance)
+	level_days = classification.level_sla_days(service_category, grievance, level)
 
 	desk = grievance.get("routing_rule") if grievance else None
 	flags = (
@@ -158,7 +165,7 @@ def resolve_policy(service_category, grievance=None) -> SLAPolicy:
 		else None
 	)
 	return SLAPolicy(
-		sla_days=classification.sla_days_for(service_category, grievance) or 0,
+		sla_days=level_days or classification.sla_days_for(service_category, grievance) or 0,
 		auto_escalate=bool(flags.auto_escalate) if flags else True,
 		notify_on_breach=bool(flags.notify_on_breach) if flags else True,
 		holiday_list=get_default_holiday_list(),
@@ -272,6 +279,38 @@ def reset_clock(grievance):
 		setattr(grievance, k, v)
 	arm_escalation(grievance, policy=policy)
 	oplog.emit("sla.clock_reset", **grievance_fields(grievance), sla_days=updates["sla_days"])
+
+
+def start_level_window(grievance, level) -> bool:
+	"""Start a fresh SLA window for the rung the case has just reached, if the rung has its own days.
+
+	The Routing Matrix gives each rung its own working days (SLA L1, SLA L2). A case that moves
+	one level up, by a missed deadline, a reopen or an officer's escalation, gets that rung's days
+	from now: the reminders start again and its next escalation is the new deadline. Returns
+	False and changes nothing when the rung has no days of its own for the case; the caller then
+	keeps the rung's escalation hours.
+	"""
+	from oan_grievance_service.services import classification
+
+	days = classification.level_sla_days(grievance.get("service_category"), grievance, level)
+	if not days:
+		return False
+	policy = resolve_policy(grievance.get("service_category"), grievance, level=level)
+	now = now_datetime()
+	due = calculate_working_deadline(now, days, holiday_list_name=policy.holiday_list)
+	updates = {
+		"sla_days": days,
+		"sla_start_at": now,
+		"sla_due_date": due,
+		"total_hold_time": 0,
+		**cleared_reminders(),
+		"next_escalation_at": due if policy.auto_escalate else None,
+	}
+	grievance.db_set(updates, update_modified=False)
+	for fieldname, value in updates.items():
+		setattr(grievance, fieldname, value)
+	oplog.emit("sla.level_window_started", **grievance_fields(grievance), rung=level, sla_days=days)
+	return True
 
 
 def arm_escalation(grievance, policy=None):
@@ -609,24 +648,38 @@ def _first_escalation(grievance):
 	return {} if grievance.get("escalated_at") else {"escalated_at": now_datetime()}
 
 
-def escalate(grievance, reason=None, reassign=True):
+def escalate(grievance, reason=None, reassign=True, target=None, event=C.EVENT_SLA_BREACH):
 	"""Move the case one rung up the chain and re-arm the clock.
 
-	`escalated` stays a flag, never a status, so the lifecycle stage is untouched.
-	Returns the user the case was handed to, or None when it could not move.
+	`escalated` stays a flag, never a status, so the lifecycle stage is untouched (the API shows
+	an escalated case as Escalated while it waits on an officer). Returns the user the case was
+	handed to, or None when it could not move.
 
-	The `notify_on_breach` of the desk that routed the case decides whether the breach
-	notification is queued. The escalation, its timeline entry and the reassignment happen
-	either way.
+	`target` is an officer the caller has already checked is at the next level up (an officer's
+	own escalation); otherwise the senior is found as for a breach. When the rung the case lands
+	on has its own SLA days, the case gets a fresh window of them (`start_level_window`);
+	otherwise the rung's escalation hours set the next bump.
+
+	`event` is the notification the receiving officer gets. For a breach, the `notify_on_breach`
+	of the desk that routed the case decides whether it is queued; an officer's escalation is
+	always told. The escalation, its timeline entry and the reassignment happen either way.
 	"""
 	from oan_grievance_service.services import notifications
 
-	notify = resolve_policy(grievance.service_category, grievance).notify_on_breach
+	notify = (
+		event != C.EVENT_SLA_BREACH or resolve_policy(grievance.service_category, grievance).notify_on_breach
+	)
 
 	previous_assignee = grievance.assigned_to
-	# A senior who is on leave, disabled or, on a sensitive case, Kebele-level is passed over for
-	# the rung above (`can_take_escalation`); with nobody available above, the case stays put.
-	target, level = available_senior(grievance, grievance.assigned_to)
+	if target:
+		rung = rung_on_case(target, grievance)
+		level = next((row for row in GrievanceRoleLevel.get_chain() if row.name == rung), None)
+		if not level:
+			frappe.throw(_("{0} holds no level on this grievance.").format(target), frappe.ValidationError)
+	else:
+		# A senior who is on leave, disabled or, on a sensitive case, Kebele-level is passed over
+		# for the rung above (`can_take_escalation`); with nobody available above, the case stays.
+		target, level = available_senior(grievance, grievance.assigned_to)
 	if not target:
 		changes = {"escalated": 1, **_first_escalation(grievance)}
 		audit.record_version(grievance, changes)
@@ -654,22 +707,25 @@ def escalate(grievance, reason=None, reassign=True):
 			notified=bool(notify and grievance.assigned_to),
 		)
 		if notify and grievance.assigned_to:
-			notifications.queue(grievance, C.EVENT_SLA_BREACH, recipient_override=grievance.assigned_to)
+			notifications.queue(grievance, event, recipient_override=grievance.assigned_to)
 		return grievance.assigned_to or True
 
-	# The rung the case just landed on owns the next deadline. No hours means this is a
-	# terminal rung and the ladder stops here.
-	hours = level.escalation_hours or 0
-	next_at = add_to_date(now_datetime(), hours=hours) if hours else None
 	changes = {"escalated": 1, **_first_escalation(grievance)}
 	if reassign:
 		changes["assigned_to"] = target
 	audit.record_version(grievance, changes)
-	grievance.db_set({**changes, "next_escalation_at": next_at}, update_modified=False)
+	grievance.db_set(changes, update_modified=False)
 	grievance.escalated = 1
-	grievance.next_escalation_at = next_at
 	if reassign:
 		grievance.assigned_to = target
+	# The rung the case just landed on owns the next deadline: its own SLA days when it has them,
+	# else its escalation hours. No hours means this is a terminal rung and the ladder stops here.
+	if not (reassign and start_level_window(grievance, level.name)):
+		hours = level.escalation_hours or 0
+		next_at = add_to_date(now_datetime(), hours=hours) if hours else None
+		grievance.db_set("next_escalation_at", next_at, update_modified=False)
+		grievance.next_escalation_at = next_at
+	next_at = grievance.next_escalation_at
 
 	level_role = level.level_name or level.name
 	body = f"Case escalated to {level_role}"
@@ -696,7 +752,7 @@ def escalate(grievance, reason=None, reassign=True):
 		notified=bool(notify),
 	)
 	if notify:
-		notifications.queue(grievance, C.EVENT_SLA_BREACH, recipient_override=target)
+		notifications.queue(grievance, event, recipient_override=target)
 	return target
 
 
@@ -727,7 +783,10 @@ def rung_on_case(user, grievance):
 	)
 	rank = {rung.name: index for index, rung in enumerate(GrievanceRoleLevel.get_chain())}
 	covering = covering_rows(
-		rows, grievance.assigned_dept, grievance.service_category, grievance.administrative_area
+		rows,
+		grievance.get("assigned_dept"),
+		grievance.get("service_category"),
+		grievance.get("administrative_area"),
 	)
 	for candidates in (covering, rows):
 		levels = [row.role_level for row in candidates if row.role_level in rank]
@@ -803,9 +862,10 @@ def senior_for_reopen(grievance, resolver):
 def escalate_on_reopen(grievance):
 	"""Hand a reopened case to the officer above its last resolver.
 
-	The case is flagged escalated and its new SLA window (started by the reopen) is kept: the
-	officer it lands on works to that deadline, and the breach ladder climbs from there. The
-	submitter's reason is on the reopen's own timeline entry, so it is not repeated here.
+	The case is flagged escalated and gets a new SLA window: the days of the rung it lands on when
+	that rung has its own (`start_level_window`), else the window the reopen started. The officer
+	works to that deadline, and the breach ladder climbs from there. The submitter's reason is on
+	the reopen's own timeline entry, so it is not repeated here.
 
 	When nobody above is available (the resolver holds the top rung, or every rung above is vacant
 	or on leave), the case stays with the officer the climb started from, falling back to its
@@ -842,6 +902,10 @@ def escalate_on_reopen(grievance):
 	audit.record_version(grievance, changes)
 	grievance.db_set(changes, update_modified=False)
 	assignee = grievance.assigned_to
+	# The reopen started a window on the resolver's rung; the case now runs on the rung it sits on.
+	final_level = level.name if target else rung_on_case(assignee, grievance)
+	if final_level:
+		start_level_window(grievance, final_level)
 
 	GrievanceTimeline.record(
 		grievance=grievance.name,

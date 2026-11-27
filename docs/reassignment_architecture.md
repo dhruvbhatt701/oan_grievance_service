@@ -101,6 +101,16 @@ flowchart TD
 - **Category Admin (`department_head` rung):** Evaluated dynamically as the officer holding the top active leadership rank covering the target department and the grievance's administrative jurisdiction.
 - **Self-Approval Prohibition:** A requester can never approve their own pending change request, ensuring separation of duties.
 
+### 4. What an Officer May Move (`reassignment.officer_move_limits`)
+
+Checked on every reassignment request, alongside the approval route above:
+
+- **Category:** only an unrestricted administrator moves a case to another category. The one exception is the fallback ("Other") desk, whose officers triage a case still in the fallback category to its real one. Any other officer is refused (403); a misfiled case goes to an administrator. A department move stays open to officers, decided by the receiving head.
+- **In line:** the officers in line for a case are those on the next rung above its holder who can take it now (`next_level_officers`: on a desk covering the case, enabled, not on leave, and not Kebele-level for a sensitive case; a vacant rung is skipped), and those below the requester on a desk of theirs covering the case. Every officer on the next rung qualifies, not only the holder's `reports_to`. These follow the approval route above as before.
+- **Out of line:** a pick outside those (a same-level colleague, another department's officer) is not refused, but always waits for the receiving head, even on a desk whose approval flag is off. Only that head, or an administrator, applies it directly.
+- `GET /grievances/options?ticket_number=...` lists only the officers in line for such a caller (the category admin included when they are the next level) and returns `can_change_category`.
+- `POST /grievances/<ticket>/escalate` hands the case to the next level at once, as a missed deadline would: flagged escalated, the new level's SLA window, and the Manual Escalation notice to the receiving officer.
+
 ---
 
 ## 4. Dynamic Scope Alignment (Category & Type Resolution)
@@ -152,11 +162,16 @@ flowchart TD
 
 Reassignment affects resolution timelines depending on whether the service classification changes:
 
-| Reassignment Scenario                         | SLA Due Date Impact           | SLA Elapsed Clock | Escalation Status             |
-| :-------------------------------------------- | :---------------------------- | :---------------- | :---------------------------- |
-| **Intra-Department Handoff** (Same Category)  | Preserved                     | Preserved         | Preserved                     |
-| **Cross-Department Transfer** (Same Category) | Preserved                     | Preserved         | Preserved                     |
-| **Category Reclassification** (Any Transfer)  | **Recalculated from Scratch** | **Reset to Zero** | **Cleared (`escalated = 0`)** |
+| Reassignment Scenario                         | SLA Due Date Impact             | SLA Elapsed Clock | Escalation Status             |
+| :-------------------------------------------- | :------------------------------ | :---------------- | :---------------------------- |
+| **Intra-Department Handoff** (Same Category)  | Preserved                       | Preserved         | Preserved                     |
+| **Cross-Department Transfer** (Same Category) | Preserved                       | Preserved         | Preserved                     |
+| **Category Reclassification** (Any Transfer)  | **Recalculated from Scratch**   | **Reset to Zero** | **Cleared (`escalated = 0`)** |
+| **Handover to Another Level** (Same Category) | New window of that level's days | Reset to Zero     | Preserved                     |
+
+A level's days are the category's SLA rules naming that `role_level` (the Routing Matrix's SLA L1 and
+SLA L2, in working days). A level with no rule of its own keeps the case's window; see
+`sla.start_level_window`.
 
 ```mermaid
 sequenceDiagram
